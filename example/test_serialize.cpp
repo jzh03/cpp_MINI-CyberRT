@@ -66,7 +66,12 @@ struct PowerData_test : public Serializable
 };
 struct PowerData_pb : public Serializable
 {
-    
+    float fx;//x轴力
+    float fy;//y轴力
+    float fz;//z轴力
+    float Mx;//x轴力矩
+    float My;//y轴力矩
+    float Mz;//z轴力矩
     RoleType role;
     QosDurabilityPolicy policy = DURABILITY_SYSTEM_DEFAULT;
     void show(){

@@ -11,7 +11,7 @@ void function() { CRoutine::Yield(RoutineState::IO_WAIT); }
 int main()
 {
     hnu::cmw::Init("croutine_test");
-    std::shared_ptr<CRoutine> cr = std::make_shared<CRoutine>(function);
+    std::shared_ptr<CRoutine> cr = std::make_shared<CRoutine>(::function);
 
     auto id = GlobalData::RegisterTaskName("croutine");
 

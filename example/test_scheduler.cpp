@@ -137,4 +137,5 @@ int main(int argc, char const *argv[])
     // test_notify_task();
     // test_set_inner_thread_attr();
     //test_classic();
+    scheduler::Instance()->Shutdown();
 }
