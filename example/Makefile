@@ -1,43 +1,135 @@
-# 编译器和选项
-CC      := g++
-CFLAGS  := -std=c++14 
-DEBUG   := -g 
-INCLUDE := -I/home/timer/Fast-DDS/install/include \
-           -I/home/timer/gtest/build/_install/include \
-           -I../../ \
-           -I../thirdparty/
+# Minimal build for the publisher/subscriber runtime examples.
 
-ThirdPartyLibPath := -L/home/timer/Fast-DDS/install/lib \
-                     -L/home/timer/gtest/build/_install/lib
+CXX              ?= g++
+PROJECT_ROOT      := $(abspath ..)
+FAST_DDS_HOME     ?= $(HOME)/cpp/fastdds_2.12/install
+FAST_DDS_INC_DIR  := $(FAST_DDS_HOME)/include
+FAST_DDS_LIB_DIR  := $(FAST_DDS_HOME)/lib
 
-ThirdPartyLib := -lfastrtps -lfastcdr -lfoonathan_memory-0.7.3 \
-                 -lpthread -luuid -lrt -latomic -lgtest -ldl
+BUILD_DIR         ?= $(CURDIR)/build
+OBJ_DIR           := $(BUILD_DIR)/obj
+BIN_DIR           := $(BUILD_DIR)/bin
+COMPAT_INC_DIR    := $(BUILD_DIR)/include
+CMW_INCLUDE_LINK  := $(COMPAT_INC_DIR)/cmw
 
-# 可执行文件列表
-EXECUTABLES := test_writer test_reader test_serialize test_node_manager \
-              test_channel_manager test_topology_manager test_publisher \
-              test_subscriber test_log test_getenv test_croutine test_scheduler \
-              test_task test_blocker test_class_loader test_node \
-              test_publisher_subscriber \
+CPPFLAGS := -I$(COMPAT_INC_DIR) \
+            -I$(PROJECT_ROOT)/thirdparty \
+            -I$(FAST_DDS_INC_DIR)
+CXXFLAGS := -std=c++14 -g
+LDFLAGS  := -L$(FAST_DDS_LIB_DIR) -Wl,-rpath,$(FAST_DDS_LIB_DIR)
+LDLIBS   := -Wl,--no-as-needed \
+            -lfastrtps -lfastcdr -lfoonathan_memory-0.7.3 \
+            -Wl,--as-needed -lpthread -luuid -lrt -latomic -ldl
 
+# Keep discovery inside explicit runtime directories. Tests, examples,
+# thirdparty sources, class-loader plugins and components are excluded.
+COMMON_SOURCE_DIRS     := common config discovery event log node serialize \
+                          time transport
+SUBSCRIBER_SOURCE_DIRS := croutine scheduler
+COMMON_SOURCE_ROOTS    := $(addprefix $(PROJECT_ROOT)/,$(COMMON_SOURCE_DIRS))
+SUBSCRIBER_SOURCE_ROOTS := $(addprefix $(PROJECT_ROOT)/,$(SUBSCRIBER_SOURCE_DIRS))
+COMMON_CPP_SRCS := $(shell find $(COMMON_SOURCE_ROOTS) -type f -name '*.cpp' | sort)
+SUBSCRIBER_CPP_SRCS := $(shell find $(SUBSCRIBER_SOURCE_ROOTS) -type f -name '*.cpp' | sort)
+SUBSCRIBER_ASM_SRCS := $(shell find $(PROJECT_ROOT)/croutine -type f -name '*.S' | sort)
 
-# 找出源文件
-SRCS := $(shell find ../* -type f | grep '\.cpp' | grep -v './test.*\.cpp')
-ASMS := $(shell find ../* -type f | grep '\.S')
-OBJS := $(patsubst %.cpp, %.o, $(SRCS)) $(patsubst %.S, %.o, $(ASMS))
+COMMON_CPP_RELS := $(patsubst $(PROJECT_ROOT)/%,%,$(COMMON_CPP_SRCS))
+SUBSCRIBER_CPP_RELS := $(patsubst $(PROJECT_ROOT)/%,%,$(SUBSCRIBER_CPP_SRCS))
+SUBSCRIBER_ASM_RELS := $(patsubst $(PROJECT_ROOT)/%,%,$(SUBSCRIBER_ASM_SRCS))
 
-# 编译规则
-%.o: %.cpp
-	$(CC) $(INCLUDE) $(CFLAGS) $(DEBUG) -c -o $@ $<
+PUBLISHER_CORE_OBJS := $(OBJ_DIR)/init.o \
+    $(addprefix $(OBJ_DIR)/,$(COMMON_CPP_RELS:.cpp=.o))
+SUBSCRIBER_CORE_OBJS := $(PUBLISHER_CORE_OBJS) $(OBJ_DIR)/state.o \
+    $(addprefix $(OBJ_DIR)/,$(SUBSCRIBER_CPP_RELS:.cpp=.o)) \
+    $(addprefix $(OBJ_DIR)/,$(SUBSCRIBER_ASM_RELS:.S=.o))
 
-%.o: %.S
-	$(AS) -c $< -o $@
+# Preserve the original example test coverage while keeping source discovery
+# bounded to CyberRT implementation directories.
+TEST_SOURCE_DIRS := blocker class_loader common component config croutine \
+                    discovery event log node scheduler serialize sysmo task \
+                    time transport
+TEST_SOURCE_ROOTS := $(addprefix $(PROJECT_ROOT)/,$(TEST_SOURCE_DIRS))
+TEST_CPP_SRCS := $(shell find $(TEST_SOURCE_ROOTS) -type f -name '*.cpp' | sort)
+TEST_ASM_SRCS := $(shell find $(PROJECT_ROOT)/croutine -type f -name '*.S' | sort)
+TEST_ROOT_SRCS := $(PROJECT_ROOT)/binary.cpp $(PROJECT_ROOT)/init.cpp \
+                  $(PROJECT_ROOT)/state.cpp
+TEST_CPP_RELS := $(patsubst $(PROJECT_ROOT)/%,%,$(TEST_ROOT_SRCS) $(TEST_CPP_SRCS))
+TEST_ASM_RELS := $(patsubst $(PROJECT_ROOT)/%,%,$(TEST_ASM_SRCS))
+TEST_CORE_OBJS := $(addprefix $(OBJ_DIR)/,$(TEST_CPP_RELS:.cpp=.o)) \
+                  $(addprefix $(OBJ_DIR)/,$(TEST_ASM_RELS:.S=.o))
 
-# 生成可执行文件的规则
-$(EXECUTABLES): %: $(OBJS) %.cpp
-	$(CC) $(INCLUDE) $(DEBUG) -o $@.out $^ $(ThirdPartyLibPath) $(ThirdPartyLib)
+TEST_TARGETS := test_writer test_reader test_serialize test_node_manager \
+                test_channel_manager test_topology_manager test_publisher \
+                test_subscriber test_log test_getenv test_croutine \
+                test_scheduler test_task test_blocker test_class_loader \
+                test_node test_publisher_subscriber
+CLASS_LOADER_PLUGIN_DIR := $(PROJECT_ROOT)/class_loader/test
+CLASS_LOADER_PLUGINS := $(CLASS_LOADER_PLUGIN_DIR)/libplugin1.so \
+                        $(CLASS_LOADER_PLUGIN_DIR)/libplugin2.so
 
-# 清理规则
-.PHONY: clean
+PUBLISHER_OBJ  := $(OBJ_DIR)/example/test_publisher.o
+SUBSCRIBER_OBJ := $(OBJ_DIR)/example/test_subscriber.o
+PUBLISHER_BIN  := $(BIN_DIR)/publisher
+SUBSCRIBER_BIN := $(BIN_DIR)/subscriber
+
+FAST_DDS_REQUIRED := \
+    $(FAST_DDS_INC_DIR)/fastrtps/rtps/RTPSDomain.h \
+    $(FAST_DDS_INC_DIR)/fastrtps/rtps/participant/RTPSParticipant.h \
+    $(FAST_DDS_LIB_DIR)/libfastrtps.so \
+    $(FAST_DDS_LIB_DIR)/libfastcdr.so \
+    $(FAST_DDS_LIB_DIR)/libfoonathan_memory-0.7.3.so
+
+.DEFAULT_GOAL := all
+
+.PHONY: all publisher subscriber tests $(TEST_TARGETS) check-fastdds clean
+.SECONDARY: $(TEST_CORE_OBJS) \
+            $(addprefix $(OBJ_DIR)/example/,$(addsuffix .o,$(TEST_TARGETS)))
+
+all: publisher subscriber
+
+publisher: $(PUBLISHER_BIN)
+
+subscriber: $(SUBSCRIBER_BIN)
+
+tests: $(TEST_TARGETS)
+
+$(TEST_TARGETS): %: $(BIN_DIR)/%
+
+test_class_loader: $(CLASS_LOADER_PLUGINS)
+
+check-fastdds:
+	@for file in $(FAST_DDS_REQUIRED); do \
+		test -e "$$file" || { echo "Missing Fast DDS file: $$file" >&2; exit 1; }; \
+	done
+
+$(PUBLISHER_BIN): $(PUBLISHER_CORE_OBJS) $(PUBLISHER_OBJ) Makefile | check-fastdds $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
+
+$(SUBSCRIBER_BIN): $(SUBSCRIBER_CORE_OBJS) $(SUBSCRIBER_OBJ) Makefile | check-fastdds $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
+
+$(BIN_DIR)/test_class_loader: LDFLAGS += -Wl,--export-dynamic
+
+$(BIN_DIR)/test_%: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/test_%.o Makefile | check-fastdds $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS) -lgtest
+
+$(CLASS_LOADER_PLUGIN_DIR)/lib%.so: $(CLASS_LOADER_PLUGIN_DIR)/%.cc | $(CMW_INCLUDE_LINK)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared -fPIC -o $@ $^ -lpthread -ldl
+
+$(OBJ_DIR)/%.o: $(PROJECT_ROOT)/%.cpp | $(CMW_INCLUDE_LINK)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/%.o: $(PROJECT_ROOT)/%.S | $(CMW_INCLUDE_LINK)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CPPFLAGS) -c -o $@ $<
+
+$(CMW_INCLUDE_LINK):
+	@mkdir -p $(COMPAT_INC_DIR)
+	@ln -sfn $(PROJECT_ROOT) $@
+
+$(BIN_DIR):
+	@mkdir -p $@
+
 clean:
-	rm -rf *.out *.log $(OBJS)
+	rm -rf $(BUILD_DIR)
+	rm -f $(CLASS_LOADER_PLUGINS)
