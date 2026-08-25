@@ -14,6 +14,7 @@ public:
     virtual bool unserialize(DataStream & stream) = 0;
 };
 
+// 自定义类型读取时校验类型标记，并向上层传递任一字段的读取失败。
 #define SERIALIZE(...)                              \
                                                     \
     void serialize(DataStream & stream) const       \
@@ -25,14 +26,13 @@ public:
                                                     \
     bool unserialize(DataStream & stream)           \
     {                                               \
-        char type;                                  \
-        stream.read(&type, sizeof(char));           \
-        if (type != DataStream::CUSTOM)             \
+        char type = 0;                              \
+        if (!stream.read(&type, sizeof(char)) ||     \
+            type != DataStream::CUSTOM)             \
         {                                           \
             return false;                           \
         }                                           \
-        stream.read_args(__VA_ARGS__);              \
-        return true;                                \
+        return stream.read_args(__VA_ARGS__);       \
     }
     
 }

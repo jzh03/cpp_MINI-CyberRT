@@ -83,5 +83,8 @@ int main()
 
     test_run_member_function();
 
+    TaskManager::CleanUp();
+    scheduler::Instance()->Shutdown();
+
     return 0;
 }

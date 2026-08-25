@@ -69,6 +69,7 @@ void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index){
         AWARN << "fail to acquire block, channel: "
           << GlobalData::GetChannelById(channel_id)
           << " index: " << block_index;
+        return;
       }
 
     MessageInfo msg_info;

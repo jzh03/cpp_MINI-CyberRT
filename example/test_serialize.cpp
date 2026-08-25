@@ -1,101 +1,114 @@
+#include <cstdint>
+#include <exception>
 #include <iostream>
-
-using namespace std;
-#include <cmw/serialize/serializable.h>
-#include <cmw/serialize/data_stream.h>
+#include <limits>
+#include <string>
 #include <vector>
+
+#include <cmw/serialize/data_stream.h>
+
 using namespace hnu::cmw::serialize;
 
-enum QosDurabilityPolicy {
-  DURABILITY_SYSTEM_DEFAULT = 0,
-  DURABILITY_TRANSIENT_LOCAL = 1,
-  DURABILITY_VOLATILE = 2,
-};
-
-
-enum RoleType {
-  ROLE_NODE = 1,
-  ROLE_WRITER = 2,
-  ROLE_READER = 3,
-  ROLE_SERVER = 4,
-  ROLE_CLIENT = 5,
-  ROLE_PARTICIPANT = 6,
-};
-
-class Data_test : public Serializable
+template <typename T>
+bool VectorRoundTrip(const std::vector<T>& expected)
 {
-public:
-    string a;
-    uint32_t b;
-    RoleType role;
-    QosDurabilityPolicy policy = DURABILITY_SYSTEM_DEFAULT;
-    std::vector<int> image;
-    int c;
-    void show(){
-        std::cout << "a:" << a << " b:" << b << " role:" <<(int)role << " c:" << c <<std::endl;
-    }
-    SERIALIZE(a,b,role,c,policy,image)
-};
+    DataStream stream;
+    stream << expected;
 
+    std::vector<T> actual;
+    return stream.read(actual) && actual == expected;
+}
 
-class Data_pb : public Serializable
+bool DataStreamTest_vector_round_trip()
 {
-public:
-    string c;
-    Data_test b;
-    void show(){
-        std::cout << "c:" << c <<std::endl;
-    }
-    SERIALIZE(c,b)
-};
-struct PowerData_test : public Serializable
+    // 覆盖三类元素的空 vector 和正常多元素 vector。
+    return VectorRoundTrip(std::vector<int>()) &&
+           VectorRoundTrip(std::vector<int>{-7, 0, 42}) &&
+           VectorRoundTrip(std::vector<double>()) &&
+           VectorRoundTrip(std::vector<double>{-1.5, 0.0, 3.25}) &&
+           VectorRoundTrip(std::vector<std::string>()) &&
+           VectorRoundTrip(std::vector<std::string>{"", "CyberRT", "vector"});
+}
+
+bool DataStreamTest_truncated_payload()
 {
-    float fx;//x轴力
-    float fy;//y轴力
-    float fz;//z轴力
-    float Mx;//x轴力矩
-    float My;//y轴力矩
-    float Mz;//z轴力矩
-    RoleType role;
-    QosDurabilityPolicy policy = DURABILITY_SYSTEM_DEFAULT;
-    void show(){
-        std::cout << "fx:" << fx << " fy:" << fy << " fz " <<std::endl;
-        std::cout<< " role:" <<(int)role << " Mx:" <<   Mx  << " My:" << My <<"MZ"<< Mz <<std::endl;
+    // 截断基础类型 payload 后，读取应失败且目标值保持不变。
+    DataStream encoded;
+    encoded.write(static_cast<int64_t>(123456789));
+    if (encoded.size() <= 1)
+    {
+        return false;
     }
-    SERIALIZE(fx,fy,fz,role,Mx,My,Mz,policy)
-};
-struct PowerData_pb : public Serializable
+
+    DataStream truncated(encoded.data(), encoded.size() - 1);
+    int64_t value = 7;
+    if (truncated.read(value) || value != 7)
+    {
+        return false;
+    }
+
+    char next = 0;
+    return !truncated.read(next);
+}
+
+bool DataStreamTest_invalid_string_length()
 {
-    
-    RoleType role;
-    QosDurabilityPolicy policy = DURABILITY_SYSTEM_DEFAULT;
-    void show(){
-        std::cout << "fx:" << fx << " fy:" << fy << " fz " <<std::endl;
-        std::cout<< " role:" <<(int)role << " Mx:" <<   Mx  << " My:" << My <<"MZ"<< Mz <<std::endl;
+    // 声明长度超过剩余数据时，不应越界读取或修改原字符串。
+    DataStream stream;
+    char type = DataStream::STRING;
+    stream.write(&type, sizeof(type));
+    stream.write(static_cast<int32_t>(32));
+    stream.write("abc", 3);
+
+    std::string value = "unchanged";
+    return !stream.read(value) && value == "unchanged";
+}
+
+bool DataStreamTest_invalid_vector_length()
+{
+    // 明显非法的元素数量不应触发异常大内存申请。
+    DataStream stream;
+    char type = DataStream::VECTOR;
+    stream.write(&type, sizeof(type));
+    stream.write(std::numeric_limits<int32_t>::max());
+    stream.write(static_cast<int32_t>(17));
+
+    std::vector<int> value{5};
+    if (stream.read(value) || value != std::vector<int>{5})
+    {
+        return false;
     }
-    SERIALIZE(fx,fy,fz,role,Mx,My,Mz,policy)
-};
+
+    int32_t trailing_value = 0;
+    return !stream.read(trailing_value);
+}
+
 int main()
 {
+    try
+    {
+        bool vector_passed = DataStreamTest_vector_round_trip();
+        bool truncated_passed = DataStreamTest_truncated_payload();
+        bool string_length_passed = DataStreamTest_invalid_string_length();
+        bool vector_length_passed = DataStreamTest_invalid_vector_length();
 
-    DataStream ds;
+        std::cout << "Vector round-trip: "
+                  << (vector_passed ? "PASS" : "FAIL") << std::endl;
+        std::cout << "Truncated payload: "
+                  << (truncated_passed ? "PASS" : "FAIL") << std::endl;
+        std::cout << "Invalid string length: "
+                  << (string_length_passed ? "PASS" : "FAIL") << std::endl;
+        std::cout << "Invalid vector length: "
+                  << (vector_length_passed ? "PASS" : "FAIL") << std::endl;
 
-    Data_test data;
-    data.a = "test";
-    data.role = ROLE_CLIENT;
-    data.b = 5;
-    data.c = 500;
-
-
-    Data_pb data_test;
-    data_test.b = data;
-    data_test.c = "test";
-    ds << data_test;
-
-    Data_pb data1;
-
-    ds >> data1;
-    data1.b.show();
-    data1.show();
-    return 0;
+        return vector_passed && truncated_passed && string_length_passed &&
+                       vector_length_passed
+                   ? 0
+                   : 1;
+    }
+    catch (const std::exception& error)
+    {
+        std::cerr << "Serialization test exception: " << error.what() << std::endl;
+        return 1;
+    }
 }

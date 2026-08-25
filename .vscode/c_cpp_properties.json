@@ -3,13 +3,16 @@
         {
             "name": "Linux",
             "includePath": [
-                "/home/timer/Fast-DDS/install/include",   
-                "/home/timer/Fast-DDS",
-                "/home/timer/Fast-DDS/cmw/thirdparty",
-                "/home/timer/gtest/build/_install/include"
+                "${workspaceFolder}/example/build/include",
+                "${workspaceFolder}",
+                "${workspaceFolder}/thirdparty",
+                "${env:HOME}/cpp/fastdds_2.12/install/include"
             ],
-            "defines": []
-
+            "defines": [],
+            "compilerPath": "/usr/bin/g++",
+            "cStandard": "c11",
+            "cppStandard": "c++14",
+            "intelliSenseMode": "linux-gcc-x64"
         }
     ],
     "version": 4

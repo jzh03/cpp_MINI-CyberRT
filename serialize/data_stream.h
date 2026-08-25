@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <limits>
 #include <cmw/serialize/serializable.h>
 #include <cmw/common/log.h>
 #include <cmw/time/time.h>
@@ -183,35 +184,38 @@ public:
 private:
     void reserve(int len);
     ByteOrder byteorder();
+    // 以下辅助函数统一完成读取边界检查，并在失败后保持失败状态。
+    bool read_type(DataType type);
+    bool read_value(DataType type, void* value, size_t size);
+    bool has_remaining(size_t size) const;
+    size_t remaining() const;
+    bool fail(int pos);
 
 private:
     std::vector<char> m_buf;
     int m_pos;
     ByteOrder m_byteorder;
+    // 失败状态具有粘性，reset/clear/load 后才允许重新读取。
+    bool m_failed;
 };
 
 template <typename T>
 void DataStream::write(const std::vector<T> & value)
 {
+    if (value.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+    {
+        throw std::length_error("vector is too large to serialize");
+    }
+
     char type = DataType::VECTOR;
     write((char *)&type, sizeof(char));
-    int len = value.size();
+    // 长度字段表示元素数量，每个元素继续使用既有格式序列化。
+    int32_t len = static_cast<int32_t>(value.size());
     write(len);
-
-    uint64_t start = Time::Now().ToMicrosecond();
-    // for (int i = 0; i < len; i++)
-    // {
-    //     write(value[i]);
-    // }
-    const T* ptr = value.data();
-    const char* char_ptr = reinterpret_cast<const char*>(ptr);
-    write(char_ptr, value.size());
-
-    // 记录结束时间
-    uint64_t end = Time::Now().ToMicrosecond();
-
-    // 计算耗时（以微秒为单位）
-    uint64_t elapsed  = end - start;
+    for (size_t i = 0; i < value.size(); ++i)
+    {
+        write(value[i]);
+    }
 }
 
 template <typename T>
@@ -275,102 +279,149 @@ void DataStream::write_args(const T & head, const Args&... args)
 template <typename T>
 bool DataStream::read(std::vector<T> & value)
 {
-    value.clear();
-    if (m_buf[m_pos] != DataType::VECTOR)
+    int start = m_pos;
+    if (!read_type(DataType::VECTOR))
     {
-        return false;
+        return fail(start);
     }
-    ++m_pos;
-    int len;
-    read(len);
-    // for (int i = 0; i < len; i++)
-    // {
-    //     T v;
-    //     read(v);
-    //     value.emplace_back(v);
-    // }
-    value.resize(len);
-    T* ptr = value.data();
-    char* char_ptr = reinterpret_cast<char*>(ptr);
-    read(char_ptr, len);
+
+    // 使用临时容器，读取失败时保留调用方原有内容。
+    std::vector<T> result;
+    int32_t len = 0;
+    if (!read(len) || len < 0 || static_cast<size_t>(len) > remaining() ||
+        static_cast<size_t>(len) > result.max_size())
+    {
+        return fail(start);
+    }
+
+    // 不按不可信长度预分配内存，而是逐元素校验并读取。
+    for (int32_t i = 0; i < len; ++i)
+    {
+        T element;
+        if (!read(element))
+        {
+            return fail(start);
+        }
+        result.push_back(element);
+    }
+    value.swap(result);
     return true;
 }
 
 template <typename T>
 bool DataStream::read(std::list<T> & value)
 {
-    value.clear();
-    if (m_buf[m_pos] != DataType::LIST)
+    int start = m_pos;
+    if (!read_type(DataType::LIST))
     {
-        return false;
+        return fail(start);
     }
-    ++m_pos;
-    int len;
-    read(len);
-    for (int i = 0; i < len; i++)
+
+    int32_t len = 0;
+    if (!read(len) || len < 0 || static_cast<size_t>(len) > remaining())
+    {
+        return fail(start);
+    }
+
+    std::list<T> result;
+    for (int32_t i = 0; i < len; ++i)
     {
         T v;
-        read(v);
-        value.push_back(v);
+        if (!read(v))
+        {
+            return fail(start);
+        }
+        result.push_back(v);
     }
+    value.swap(result);
     return true;
 }
 
 template <typename K, typename V>
 bool DataStream::read(std::map<K, V> & value)
 {
-    value.clear();
-    if (m_buf[m_pos] != DataType::MAP)
+    int start = m_pos;
+    if (!read_type(DataType::MAP))
     {
-        return false;
+        return fail(start);
     }
-    ++m_pos;
-    int len;
-    read(len);
-    for (int i = 0; i < len; i++)
+
+    int32_t len = 0;
+    if (!read(len) || len < 0 || static_cast<size_t>(len) > remaining())
+    {
+        return fail(start);
+    }
+
+    std::map<K, V> result;
+    for (int32_t i = 0; i < len; ++i)
     {
         K k;
-        read(k);
+        if (!read(k))
+        {
+            return fail(start);
+        }
 
         V v;
-        read(v);
-        value[k] = v;
+        if (!read(v))
+        {
+            return fail(start);
+        }
+        result[k] = v;
     }
+    value.swap(result);
     return true;
 }
 
 template <typename T>
 bool DataStream::read(std::set<T> & value)
 {
-    value.clear();
-    if (m_buf[m_pos] != DataType::SET)
+    int start = m_pos;
+    if (!read_type(DataType::SET))
     {
-        return false;
+        return fail(start);
     }
-    ++m_pos;
-    int len;
-    read(len);
-    for (int i = 0; i < len; i++)
+
+    int32_t len = 0;
+    if (!read(len) || len < 0 || static_cast<size_t>(len) > remaining())
+    {
+        return fail(start);
+    }
+
+    std::set<T> result;
+    for (int32_t i = 0; i < len; ++i)
     {
         T v;
-        read(v);
-        value.insert(v);
+        if (!read(v))
+        {
+            return fail(start);
+        }
+        result.insert(v);
     }
+    value.swap(result);
     return true;
 }
 
 template <typename T, typename = std::enable_if_t<std::is_enum<T>::value>>
 bool DataStream::read(T& value)
 {
-    int32_t& intValue = reinterpret_cast<int32_t&>(value);
-    return read(intValue);
+    int32_t int_value = 0;
+    if (!read(int_value))
+    {
+        return false;
+    }
+    value = static_cast<T>(int_value);
+    return true;
 }
 
 template <typename T, typename ...Args>
 bool DataStream::read_args(T & head, Args&... args)
 {
-    read(head);
-    return read_args(args...);
+    int start = m_pos;
+    if (!read(head) || !read_args(args...))
+    {
+        return fail(start);
+    }
+    return true;
 }
 
 template <typename T>

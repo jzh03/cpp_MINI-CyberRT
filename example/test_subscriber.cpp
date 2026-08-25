@@ -1,8 +1,10 @@
 #include <cmw/node/subscriber.h>
 #include <cmw/config/RoleAttributes.h>
 #include <cmw/transport/message/message_info.h>
+#ifdef CMW_ENABLE_GTEST
 #include <cmw/config/unit_test.h>
 #include <gtest/gtest.h>
+#endif
 #include <cmw/init.h>
 using namespace hnu::cmw;
 
@@ -49,6 +51,7 @@ namespace Timer{
 
 using namespace config;
 
+#ifdef CMW_ENABLE_GTEST
 auto callback = [](const std::shared_ptr<Chatter>& msg){
     AINFO << "msg content: " << msg->content;
 };
@@ -206,6 +209,8 @@ void SubscriberTest2(){
 
     AINFO << "Finish SubscriberTest2";
 }
+
+#endif
 
 void test_sub(){
         config::RoleAttributes role_attr;

@@ -18,6 +18,12 @@ Segment::Segment(uint64_t channel_id)
 
 bool Segment::AcquireBlockToWrite(std::size_t msg_size, WritableBlock* writable_block){
     RETURN_VAL_IF_NULL(writable_block ,false);
+    if(msg_size > conf_.max_message_size()){
+        AERROR << "msg_size: " << msg_size
+               << " larger than max shm message size: "
+               << conf_.max_message_size() << ".";
+        return false;
+    }
     if(!init_ && !OpenOrCreate()){
         AERROR << "create shm failed, can't write now.";
         return false;
@@ -29,7 +35,7 @@ bool Segment::AcquireBlockToWrite(std::size_t msg_size, WritableBlock* writable_
     }
 
     //如果msg_size 超过默认的 size，则销毁之前创建的共享内存，重新创建一块更大的内存
-    if(msg_size > conf_.ceiling_msg_size()){
+    if(result && msg_size > conf_.ceiling_msg_size()){
        AERROR<< "msg_size: " << msg_size
                 << " larger than current shm_buffer_size: "
                 << conf_.ceiling_msg_size() << " , need recreate.";
@@ -41,7 +47,18 @@ bool Segment::AcquireBlockToWrite(std::size_t msg_size, WritableBlock* writable_
         return false;
     }
 
+    if(msg_size > conf_.ceiling_msg_size()){
+        AERROR << "msg_size: " << msg_size
+               << " larger than updated shm_buffer_size: "
+               << conf_.ceiling_msg_size() << ".";
+        return false;
+    }
+
     uint32_t index = GetNextWritableBlockIndex();
+    if(index == UINT32_MAX){
+        AERROR << "all blocks are busy.";
+        return false;
+    }
     //将writable_block 指向 blocks_[index]
     writable_block->index = index;
     writable_block->block = &blocks_[index];
@@ -66,12 +83,6 @@ bool Segment::AcquireBlockToRead(ReadableBlock* readable_block){
         return false;       
     }
 
-    auto index = readable_block->index;
-    if(index >= conf_.block_num()){
-        AERROR << "invalid block_index[" << index << "].";
-        return false;
-    }
-
     bool result = true;
     if( state_->need_remap() ){
         result = Remap();
@@ -79,6 +90,12 @@ bool Segment::AcquireBlockToRead(ReadableBlock* readable_block){
 
     if(!result){
         AERROR << "segment update failed." ;
+        return false;
+    }
+
+    auto index = readable_block->index;
+    if(index >= conf_.block_num()){
+        AERROR << "invalid block_index[" << index << "].";
         return false;
     }
 
@@ -144,17 +161,17 @@ bool Segment::Recreate(const uint64_t& msg_size){
 
 uint32_t Segment::GetNextWritableBlockIndex(){
     const auto block_num = conf_.block_num();
-    while (1)
+    uint32_t start_index = state_->FetchAddSeq(1) % block_num;
+    for(uint32_t i = 0; i < block_num; ++i)
     {
-        //返回seq，并将seq加一
-        uint32_t try_idx = state_->FetchAddSeq(1) % block_num;
+        uint32_t try_idx = (start_index + i) % block_num;
         //ADEBUG << "try_idx: " << try_idx;
         //为blocks_[try_idx] 这块内存加上写锁
         if(blocks_[try_idx].TryLockForWrite()){
             return try_idx;
         }
     }
-    return 0;
+    return UINT32_MAX;
 }
 
 }

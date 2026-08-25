@@ -11,19 +11,19 @@ namespace hnu{
 namespace cmw{
 namespace serialize{
 
-DataStream::DataStream() : m_pos(0)
+DataStream::DataStream() : m_pos(0), m_failed(false)
 {
     m_byteorder = byteorder();
 }
 
-DataStream::DataStream(const string & str) : m_pos(0)
+DataStream::DataStream(const string & str) : m_pos(0), m_failed(false)
 {
     m_byteorder = byteorder();
     m_buf.clear();
     reserve(str.size());
     write(str.data(), str.size());
 }
-DataStream::DataStream(const char* ptr, size_t size) : m_pos(0)
+DataStream::DataStream(const char* ptr, size_t size) : m_pos(0), m_failed(false)
 {   
     m_byteorder = byteorder();
     m_buf.clear();  //清空vector
@@ -71,96 +71,161 @@ DataStream::ByteOrder DataStream::byteorder()
     }
 }
 
+bool DataStream::has_remaining(size_t size) const
+{
+    return m_pos >= 0 && static_cast<size_t>(m_pos) <= m_buf.size() &&
+           size <= m_buf.size() - static_cast<size_t>(m_pos);
+}
+
+size_t DataStream::remaining() const
+{
+    if (m_pos < 0 || static_cast<size_t>(m_pos) > m_buf.size())
+    {
+        return 0;
+    }
+    return m_buf.size() - static_cast<size_t>(m_pos);
+}
+
+bool DataStream::fail(int pos)
+{
+    // 回退到本次读取起点，避免失败后留下错误推进的位置。
+    if (pos >= 0 && static_cast<size_t>(pos) <= m_buf.size())
+    {
+        m_pos = pos;
+    }
+    m_failed = true;
+    return false;
+}
+
+bool DataStream::read_type(DataType type)
+{
+    if (m_failed || !has_remaining(sizeof(char)) || m_buf[m_pos] != type)
+    {
+        return fail(m_pos);
+    }
+    ++m_pos;
+    return true;
+}
+
+bool DataStream::read_value(DataType type, void* value, size_t size)
+{
+    if (m_failed || value == nullptr || !has_remaining(sizeof(char)) ||
+        m_buf[m_pos] != type || size > remaining() - sizeof(char))
+    {
+        return fail(m_pos);
+    }
+
+    // memcpy 不要求 buffer 按目标类型对齐，可避免直接指针解引用的 UB。
+    std::memcpy(value, m_buf.data() + m_pos + sizeof(char), size);
+    m_pos += sizeof(char) + size;
+    return true;
+}
+
 void DataStream::show() const
 {
-    int size = m_buf.size();
-    std::cout << "data size = " << size << std::endl;
-    int i = 0;
-    while (i < size)
+    DataStream stream(*this);
+    stream.reset();
+    std::cout << "data size = " << stream.size() << std::endl;
+
+    auto read_or_throw = [&stream](auto& value, const char* error) {
+        if (!stream.read(value))
+        {
+            throw std::logic_error(error);
+        }
+    };
+
+    while (stream.m_pos < stream.size())
     {
-        switch ((DataType)m_buf[i])
+        DataType type = static_cast<DataType>(stream.m_buf[stream.m_pos]);
+        switch (type)
         {
         case DataType::BOOL:
-            if ((int)m_buf[++i] == 0)
-            {
-                std::cout << "false";
-            }
-            else
-            {
-                std::cout << "true";
-            }
-            ++i;
+        {
+            bool value = false;
+            read_or_throw(value, "parse bool error");
+            std::cout << (value ? "true" : "false");
             break;
+        }
         case DataType::CHAR:
-            std::cout << m_buf[++i];
-            ++i;
+        {
+            char value = 0;
+            read_or_throw(value, "parse char error");
+            std::cout << value;
             break;
+        }
         case DataType::INT32:
-            std::cout << *((int32_t *)(&m_buf[++i]));
-            i += 4;
+        {
+            int32_t value = 0;
+            read_or_throw(value, "parse int32 error");
+            std::cout << value;
             break;
+        }
         case DataType::INT64:
-            std::cout << *((int64_t *)(&m_buf[++i]));
-            i += 8;
+        {
+            int64_t value = 0;
+            read_or_throw(value, "parse int64 error");
+            std::cout << value;
             break;
+        }
+        case DataType::UINT32:
+        {
+            uint32_t value = 0;
+            read_or_throw(value, "parse uint32 error");
+            std::cout << value;
+            break;
+        }
+        case DataType::UINT64:
+        {
+            uint64_t value = 0;
+            read_or_throw(value, "parse uint64 error");
+            std::cout << value;
+            break;
+        }
         case DataType::FLOAT:
-            std::cout << *((float *)(&m_buf[++i]));
-            i += 4;
+        {
+            float value = 0;
+            read_or_throw(value, "parse float error");
+            std::cout << value;
             break;
+        }
         case DataType::DOUBLE:
-            std::cout << *((double *)(&m_buf[++i]));
-            i += 8;
+        {
+            double value = 0;
+            read_or_throw(value, "parse double error");
+            std::cout << value;
             break;
+        }
         case DataType::STRING:
-            if ((DataType)m_buf[++i] == DataType::INT32)
-            {
-                int len = *((int *)(&m_buf[++i]));
-                i += 4;
-                std::cout << string(&m_buf[i], len);
-                i += len;
-            }
-            else
-            {
-                throw std::logic_error("parse string error");
-            }
+        {
+            string value;
+            read_or_throw(value, "parse string error");
+            std::cout << value;
             break;
+        }
         case DataType::VECTOR:
-            if ((DataType)m_buf[++i] == DataType::INT32)
-            {
-                int len = *((int *)(&m_buf[++i]));
-                i += 4;
-            }
-            else
-            {
-                throw std::logic_error("parse vector error");
-            }
-            break;
+        case DataType::LIST:
         case DataType::MAP:
-            if ((DataType)m_buf[++i] == DataType::INT32)
-            {
-                int len = *((int *)(&m_buf[++i]));
-                i += 4;
-            }
-            else
-            {
-                throw std::logic_error("parse map error");
-            }
-            break;
         case DataType::SET:
-            if ((DataType)m_buf[++i] == DataType::INT32)
+        {
+            int32_t len = 0;
+            if (!stream.read_type(type) || !stream.read(len) || len < 0 ||
+                static_cast<size_t>(len) > stream.remaining())
             {
-                int len = *((int *)(&m_buf[++i]));
-                i += 4;
-            }
-            else
-            {
-                throw std::logic_error("parse set error");
+                throw std::logic_error("parse container error");
             }
             break;
+        }
         case DataType::CUSTOM:
+        {
+            char custom_type = 0;
+            if (!stream.read(&custom_type, sizeof(custom_type)))
+            {
+                throw std::logic_error("parse custom type error");
+            }
             break;
+        }
         default:
-            break;
+            throw std::logic_error("parse data error");
         }
     }
     std::cout << std::endl;
@@ -297,170 +362,184 @@ void DataStream::write_args()
 
 bool DataStream::read(char * data, int len)
 {
-    std::memcpy(data, (char *)&m_buf[m_pos], len);
+    if (m_failed || len < 0 || (len > 0 && data == nullptr) ||
+        !has_remaining(static_cast<size_t>(len)))
+    {
+        return fail(m_pos);
+    }
+    if (len == 0)
+    {
+        return true;
+    }
+    std::memcpy(data, m_buf.data() + m_pos, len);
     m_pos += len;
     return true;
 }
 
 bool DataStream::read(bool & value)
 {
-    if (m_buf[m_pos] != DataType::BOOL)
+    char data = 0;
+    if (!read_value(DataType::BOOL, &data, sizeof(char)))
     {
         return false;
     }
-    ++m_pos;
-    value = m_buf[m_pos];
-    ++m_pos;
+    value = data != 0;
     return true;
 }
 
 bool DataStream::read(char & value)
 {
-    if (m_buf[m_pos] != DataType::CHAR)
+    char data = 0;
+    if (!read_value(DataType::CHAR, &data, sizeof(char)))
     {
         return false;
     }
-    ++m_pos;
-    value = m_buf[m_pos];
-    ++m_pos;
+    value = data;
     return true;
 }
 
 bool DataStream::read(int32_t & value)
 {
-    if (m_buf[m_pos] != DataType::INT32)
+    int32_t data = 0;
+    if (!read_value(DataType::INT32, &data, sizeof(int32_t)))
     {
         return false;
     }
-    ++m_pos;
-    value = *((int32_t *)(&m_buf[m_pos]));
     if (m_byteorder == ByteOrder::BigEndian)
     {
-        char * first = (char *)&value;
+        char * first = (char *)&data;
         char * last = first + sizeof(int32_t);
         std::reverse(first, last);
     }
-    m_pos += 4;
+    value = data;
     return true;
 }
 
 bool DataStream::read(uint32_t & value)
 {
-    if (m_buf[m_pos] != DataType::UINT32)
+    uint32_t data = 0;
+    if (!read_value(DataType::UINT32, &data, sizeof(uint32_t)))
     {
         return false;
     }
-    ++m_pos;
-    value = *((uint32_t *)(&m_buf[m_pos]));
     if (m_byteorder == ByteOrder::BigEndian)
     {
-        char * first = (char *)&value;
+        char * first = (char *)&data;
         char * last = first + sizeof(uint32_t);
         std::reverse(first, last);
     }
-    m_pos += 4;
+    value = data;
     return true;
 }
 
 bool DataStream::read(int64_t & value)
 {
-    if (m_buf[m_pos] != DataType::INT64)
+    int64_t data = 0;
+    if (!read_value(DataType::INT64, &data, sizeof(int64_t)))
     {
         return false;
     }
-    ++m_pos;
-    value = *((int64_t *)(&m_buf[m_pos]));
     if (m_byteorder == ByteOrder::BigEndian)
     {
-        char * first = (char *)&value;
+        char * first = (char *)&data;
         char * last = first + sizeof(int64_t);
         std::reverse(first, last);
     }
-    m_pos += 8;
+    value = data;
     return true;
 }
 
 bool DataStream::read(uint64_t & value)
 {
-    if (m_buf[m_pos] != DataType::UINT64)
+    uint64_t data = 0;
+    if (!read_value(DataType::UINT64, &data, sizeof(uint64_t)))
     {
         return false;
     }
-    ++m_pos;
-    value = *((uint64_t *)(&m_buf[m_pos]));
     if (m_byteorder == ByteOrder::BigEndian)
     {
-        char * first = (char *)&value;
+        char * first = (char *)&data;
         char * last = first + sizeof(uint64_t);
         std::reverse(first, last);
     }
-    m_pos += 8;
+    value = data;
     return true;
 }
 
 bool DataStream::read(float & value)
 {
-    if (m_buf[m_pos] != DataType::FLOAT)
+    float data = 0;
+    if (!read_value(DataType::FLOAT, &data, sizeof(float)))
     {
         return false;
     }
-    ++m_pos;
-    value = *((float *)(&m_buf[m_pos]));
     if (m_byteorder == ByteOrder::BigEndian)
     {
-        char * first = (char *)&value;
+        char * first = (char *)&data;
         char * last = first + sizeof(float);
         std::reverse(first, last);
     }
-    m_pos += 4;
+    value = data;
     return true;
 }
 
 bool DataStream::read(double & value)
 {
-    if (m_buf[m_pos] != DataType::DOUBLE)
+    double data = 0;
+    if (!read_value(DataType::DOUBLE, &data, sizeof(double)))
     {
         return false;
     }
-    ++m_pos;
-    value = *((double *)(&m_buf[m_pos]));
     if (m_byteorder == ByteOrder::BigEndian)
     {
-        char * first = (char *)&value;
+        char * first = (char *)&data;
         char * last = first + sizeof(double);
         std::reverse(first, last);
     }
-    m_pos += 8;
+    value = data;
     return true;
 }
 
 bool DataStream::read(string & value)
 {
-    if (m_buf[m_pos] != DataType::STRING)
+    int start = m_pos;
+    if (!read_type(DataType::STRING))
     {
-        return false;
+        return fail(start);
     }
-    ++m_pos;
-    int len;
-    read(len);
-    if (len < 0)
+
+    // 先验证完整长度，再写入临时对象，防止越界和异常大内存申请。
+    string result;
+    int32_t len = 0;
+    if (!read(len) || len < 0 || static_cast<size_t>(len) > remaining() ||
+        static_cast<size_t>(len) > result.max_size())
     {
-        return false;
+        return fail(start);
     }
-    value.assign((char *)&(m_buf[m_pos]), len);
+
+    if (len > 0)
+    {
+        result.assign(m_buf.data() + m_pos, len);
+    }
     m_pos += len;
+    value.swap(result);
     return true;
 }
 
 bool DataStream::read(Serializable & value)
 {
-    return value.unserialize(*this);
+    int start = m_pos;
+    if (m_failed || !value.unserialize(*this) || m_failed)
+    {
+        return fail(start);
+    }
+    return true;
 }
 
 
 bool DataStream::read_args()
 {
-    return true;
+    return !m_failed;
 }
 
 const char * DataStream::data() const
@@ -476,11 +555,14 @@ int DataStream::size() const
 void DataStream::clear()
 {
     m_buf.clear();
+    m_pos = 0;
+    m_failed = false;
 }
 
 void DataStream::reset()
 {
     m_pos = 0;
+    m_failed = false;
 }
 
 //返回序列化后的数据占用内存的字节数
@@ -504,6 +586,8 @@ void DataStream::load(const string & filename)
     ss << fin.rdbuf();
     const string & str = ss.str();
     m_buf.clear();
+    m_pos = 0;
+    m_failed = false;
     reserve(str.size());
     write(str.data(), str.size());
 }
