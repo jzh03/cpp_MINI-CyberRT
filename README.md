@@ -1,12 +1,12 @@
 # MINI_CyberRT
 
-MINI_CyberRT 是针对原始 cmw 项目进行的二次开发，在保留原有 CyberRT 与 Fast DDS 中间件架构的基础上，进一步改善正确性、健壮性和测试覆盖。
+MINI_CyberRT 是针对原始 cmw 项目进行的二次开发，在保留原有 CyberRT 与 Fast DDS 中间件架构的基础上，进一步改善健壮性并增加测试覆盖。
 
-项目视频：https://space.bilibili.com/281708692/lists/5849251?type=season
+原作者提供的项目视频：https://space.bilibili.com/281708692/lists/5849251?type=season
 
-原作者提供的讲解文档：[Feishu 文档](https://ai.feishu.cn/drive/folder/PiqFfxWx5l9Ri2dds9WcI3ognCd?from=from_copylink)
+原作者提供的讲解文档：[飞书](https://ai.feishu.cn/drive/folder/PiqFfxWx5l9Ri2dds9WcI3ognCd?from=from_copylink)
 
-## dev 分支相对原始 cmw 的改进
+## 对原项目的改进
 
 ### 序列化安全
 
@@ -25,4 +25,4 @@ MINI_CyberRT 是针对原始 cmw 项目进行的二次开发，在保留原有 C
 
 ### 测试
 
-- 新增序列化边界、SHM 消息大小/Recreate、全 Block 占用、读失败以及 SHM Transmitter/Receiver 恢复能力的回归测试。
+- 新增序列化边界、SHM 消息大小/Recreate、全 Block 占用、读失败以及 SHM Transmitter/Receiver 恢复能力的测试。
