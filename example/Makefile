@@ -61,7 +61,9 @@ TEST_TARGETS := test_writer test_reader test_serialize test_node_manager \
                 test_channel_manager test_topology_manager test_publisher \
                 test_subscriber test_log test_getenv test_croutine \
                 test_scheduler test_task test_blocker test_class_loader \
-                test_node test_publisher_subscriber
+                test_node test_publisher_subscriber \
+                test_shm_segment_robustness test_shm_dispatcher_robustness \
+                test_shm_transmitter_receiver
 CLASS_LOADER_PLUGIN_DIR := $(PROJECT_ROOT)/class_loader/test
 CLASS_LOADER_PLUGINS := $(CLASS_LOADER_PLUGIN_DIR)/libplugin1.so \
                         $(CLASS_LOADER_PLUGIN_DIR)/libplugin2.so
