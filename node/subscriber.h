@@ -7,6 +7,7 @@
 
 #include <cmw/node/subscriber_base.h>
 #include <cmw/transport/transport.h>
+#include <cmw/transport/common/identity.h>
 #include <cmw/transport/receiver/receiver.h>
 #include <cmw/discovery/specific_manager/manager.h>
 #include <cmw/discovery/specific_manager/channel_manager.h>
@@ -147,6 +148,9 @@ private:
 
     BlockerPtr blocker_ = nullptr;
 
+    // 每个 Subscriber 使用独立 endpoint id，供 Discovery 和逐 peer listener 区分。
+    transport::Identity identity_;
+
     ChangeConnection change_conn_;
     discovery::ChannelManagerPtr channel_manager_ = nullptr;
 
@@ -215,6 +219,8 @@ bool Subscriber<MessageT>::Init(){
         return false;
     }
 
+    // ReceiverManager 可按 channel 共享 Receiver，但 Discovery 中的 Reader 必须唯一。
+    role_attr_.id = identity_.HashValue();
     receiver_ = ReceiverManager<MessageT>::Instance()->GetReceiver(role_attr_);
 
     channel_manager_ = discovery::TopologyManager::Instance()->channel_manager();

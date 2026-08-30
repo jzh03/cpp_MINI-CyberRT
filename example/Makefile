@@ -63,7 +63,9 @@ TEST_TARGETS := test_writer test_reader test_serialize test_node_manager \
                 test_scheduler test_task test_blocker test_class_loader \
                 test_node test_publisher_subscriber \
                 test_shm_segment_robustness test_shm_dispatcher_robustness \
-                test_shm_transmitter_receiver
+                test_shm_transmitter_receiver test_transport_mode_selection \
+                test_hybrid_intra test_hybrid_shm_multiprocess \
+                test_rtps_same_host_multiprocess
 CLASS_LOADER_PLUGIN_DIR := $(PROJECT_ROOT)/class_loader/test
 CLASS_LOADER_PLUGINS := $(CLASS_LOADER_PLUGIN_DIR)/libplugin1.so \
                         $(CLASS_LOADER_PLUGIN_DIR)/libplugin2.so
@@ -135,3 +137,4 @@ $(BIN_DIR):
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(CLASS_LOADER_PLUGINS)
+	rm -f $(CURDIR)/*.log
