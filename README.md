@@ -15,7 +15,6 @@ MINI_CyberRT 是针对原始 cmw 项目进行的二次开发，在保留原有 C
 
 ### SHM 健壮性
 
-- SHM 后端仅保留 System V/XSI 实现：`ShmTransmitter / ShmReceiver -> Segment -> XsiSegment -> shmget/shmat`；已移除未接通的 POSIX SHM 后端。
 - 明确限制 SHM 最大消息为 32 MiB，超限消息直接返回失败，不再继续 Recreate 或 `memcpy`。
 - Segment Recreate 后再次校验实际 Block capacity，并保留原有的正常自动扩容。
 - 所有 Block 被占用时最多扫描一轮后返回失败，避免无限 busy-spin；读 Block 失败时立即丢弃本次消息，不再访问无效内存。
