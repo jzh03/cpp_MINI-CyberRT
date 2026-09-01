@@ -51,6 +51,7 @@ INTRA / SHM / RTPS
 - 新增 `IntraTransmitter`、`IntraReceiver` 和 `IntraDispatcher`。同进程消息直接传递原始 `std::shared_ptr<MessageT>`，不序列化、不进入共享内存，也不经过 Fast DDS。
 - 新增 `HybridTransmitter`，根据 Subscriber JOIN/LEAVE 按需创建并启用 INTRA、SHM、RTPS 子 Transport。
 - 新增 `HybridReceiver`，根据 Publisher 属性把 listener 注册或注销操作转发给对应 Receiver。
+- `RtpsTransmitter` 在 Disable 时会从 Fast DDS Participant 删除 Writer 并释放对应 `WriterHistory`，支持动态拓扑下重复 Enable/Disable。
 - `Transport::CreateTransmitter()` 和 `CreateReceiver()` 明确支持 `HYBRID`、`INTRA`、`SHM`、`RTPS`；显式模式仍可用于独立测试和调试。
 - `RoleAttributes` 序列化已包含 `channel_id`，保证跨进程 Discovery 获得完整 channel 元数据。
 - 每个 Subscriber 使用唯一 endpoint ID，使同一进程、同一 channel 上的多个 Subscriber 能被 Discovery 正确区分。
@@ -60,7 +61,8 @@ Hybrid Transport 使用轻量 peer 表维护状态：
 
 - 重复 JOIN 保持幂等，不重复初始化底层 Transport。
 - 单个 peer LEAVE 只移除对应关系。
-- 最后一个同模式 peer LEAVE 后，才关闭该模式的 Transport。
+- Transmitter 在最后一个同模式 peer LEAVE 后关闭对应发送 Transport；后续 peer JOIN 时可以重新启用。
+- Receiver 在 peer LEAVE 时只移除对应 listener 和 peer 关系；底层 Receiver/Dispatcher 按 channel 生命周期复用，不随单个 peer 频繁销毁和重建。HybridReceiver 整体关闭时清理登记的 listener，实际 RTPS Reader 等 channel 资源由全局 Dispatcher/Transport Shutdown 统一释放。
 - 一次 Publish 会向所有活跃模式分别发送一次；多个同模式 Subscriber 不会造成同一消息重复写入该 Transport。
 - 没有 Subscriber 时保持原有 Publish 成功语义。
 - 当前不提供 SHM/RTPS 失败后的自动 fallback，也不包含动态优先级或网络质量策略。
@@ -72,5 +74,8 @@ Hybrid Transport 使用轻量 peer 表维护状态：
 - `test_hybrid_intra`：通过真实 Publisher、Subscriber 和 Discovery 验证同进程 INTRA 通信、连续消息、Shutdown 以及多个同模式 peer 的 LEAVE 行为。
 - `test_hybrid_shm_multiprocess`：通过两个真实进程验证 Subscriber-first 启动以及同主机不同 PID 自动选择 SHM。
 - `test_rtps_same_host_multiprocess`：在同一主机的两个进程中显式强制 RTPS，验证 RTPS 数据路径未发生回归。
+- `test_hybrid_dynamic_intra`：验证同进程 Subscriber 离开后，新 Subscriber 可以重新 JOIN 并通过 INTRA 接收消息。
+- `test_hybrid_dynamic_shm_lifecycle`：验证同机跨进程 Subscriber A LEAVE 后，Subscriber B 可以重新 JOIN 并通过 SHM 通信。
+- `test_rtps_lifecycle_regression`：同机显式强制 RTPS，多轮验证 Enable、通信、Disable 和重新 Enable 的资源生命周期。
 
-> `test_rtps_same_host_multiprocess` 只是同主机强制 RTPS 数据路径测试，不等价于真正的跨主机 RTPS E2E。不同 host metadata 自动选择 RTPS 已由模式单元测试覆盖，真实跨主机通信仍需要在两台主机或两台 VM 上进行集成验证。
+> `test_rtps_same_host_multiprocess` 和 `test_rtps_lifecycle_regression` 都只是同主机强制 RTPS 数据路径测试，不等价于真正的跨主机 RTPS E2E。不同 host metadata 自动选择 RTPS 已由模式单元测试覆盖，真实跨主机通信仍需要在两台主机或两台 VM 上进行集成验证。

@@ -65,7 +65,9 @@ TEST_TARGETS := test_writer test_reader test_serialize test_node_manager \
                 test_shm_segment_robustness test_shm_dispatcher_robustness \
                 test_shm_transmitter_receiver test_transport_mode_selection \
                 test_hybrid_intra test_hybrid_shm_multiprocess \
-                test_rtps_same_host_multiprocess
+                test_rtps_same_host_multiprocess test_hybrid_dynamic_intra \
+                test_hybrid_dynamic_shm_lifecycle \
+                test_rtps_lifecycle_regression
 CLASS_LOADER_PLUGIN_DIR := $(PROJECT_ROOT)/class_loader/test
 CLASS_LOADER_PLUGINS := $(CLASS_LOADER_PLUGIN_DIR)/libplugin1.so \
                         $(CLASS_LOADER_PLUGIN_DIR)/libplugin2.so

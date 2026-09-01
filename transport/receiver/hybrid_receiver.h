@@ -14,7 +14,8 @@ namespace hnu {
 namespace cmw {
 namespace transport {
 
-// Hybrid 接收端：按 Publisher 的 Discovery 信息把 listener 转发给对应 Receiver。
+// Hybrid 接收端：按 Publisher 的 Discovery 信息转发 listener，底层接收资源按
+// channel 生命周期复用，不随单个 peer LEAVE 反复创建和销毁。
 template <typename M>
 class HybridReceiver : public Receiver<M> {
  public:
@@ -30,6 +31,7 @@ class HybridReceiver : public Receiver<M> {
 
   void Disable() override {
     std::lock_guard<std::mutex> lock(mutex_);
+    // HybridReceiver 整体关闭时统一移除仍登记的 peer listener。
     DisablePeers(intra_peers_, intra_receiver_);
     DisablePeers(shm_peers_, shm_receiver_);
     DisablePeers(rtps_peers_, rtps_receiver_);
@@ -62,7 +64,7 @@ class HybridReceiver : public Receiver<M> {
     if (peer == peers->end()) {
       return;
     }
-    // 仅注销离开的 Publisher，保留同模式的其他 Publisher。
+    // 仅注销离开的 Publisher 并保留底层 Receiver，供后续 Publisher 复用。
     GetReceiver(mode)->Disable(peer->second);
     peers->erase(peer);
   }
