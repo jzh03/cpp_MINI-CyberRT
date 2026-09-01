@@ -10,7 +10,7 @@ namespace transport{
 using hnu::cmw::common::GlobalData;
 
 auto SegmentFactory::CreateSegment(uint64_t channel_id) -> SegmentPtr{
-    std::string segment_type(XsiSegment::Type());
+    std::string segment_type(PosixSegment::Type());
 
 
     ADEBUG << "segment type: " << segment_type;

@@ -18,6 +18,7 @@ MINI_CyberRT 是针对原始 cmw 项目进行的二次开发，在保留原有 C
 - 明确限制 SHM 最大消息为 32 MiB，超限消息直接返回失败，不再继续 Recreate 或 `memcpy`。
 - Segment Recreate 后再次校验实际 Block capacity，并保留原有的正常自动扩容。
 - 所有 Block 被占用时最多扫描一轮后返回失败，避免无限 busy-spin；读 Block 失败时立即丢弃本次消息，不再访问无效内存。
+- 默认 Segment 后端为 POSIX SHM（`shm_open` + `mmap`）；`OpenOnly()` 会为当前进程重新建立 Block buffer 地址表。XSI/System V 后端仍保留，可显式用于回归和性能对比。
 
 ### API 正确性
 
@@ -77,5 +78,7 @@ Hybrid Transport 使用轻量 peer 表维护状态：
 - `test_hybrid_dynamic_intra`：验证同进程 Subscriber 离开后，新 Subscriber 可以重新 JOIN 并通过 INTRA 接收消息。
 - `test_hybrid_dynamic_shm_lifecycle`：验证同机跨进程 Subscriber A LEAVE 后，Subscriber B 可以重新 JOIN 并通过 SHM 通信。
 - `test_rtps_lifecycle_regression`：同机显式强制 RTPS，多轮验证 Enable、通信、Disable 和重新 Enable 的资源生命周期。
+- `test_posix_segment_multiprocess`：验证 POSIX Segment 双进程 `OpenOnly()`、多 Block 读写、重新打开和资源清理。
+- `shm_segment_benchmark`：以相同的跨进程 Block 读写路径比较 POSIX 与 XSI 的稳态延迟和吞吐。运行：`cd example && make shm_segment_benchmark && ./build/bin/shm_segment_benchmark`。
 
 > `test_rtps_same_host_multiprocess` 和 `test_rtps_lifecycle_regression` 都只是同主机强制 RTPS 数据路径测试，不等价于真正的跨主机 RTPS E2E。不同 host metadata 自动选择 RTPS 已由模式单元测试覆盖，真实跨主机通信仍需要在两台主机或两台 VM 上进行集成验证。

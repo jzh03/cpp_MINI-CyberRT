@@ -7,17 +7,22 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <unistd.h>
 namespace hnu{
 namespace cmw{
 namespace transport{
 
-PosixSegment::PosixSegment(uint64_t channel_id) : Segment(channel_id) {
-    shm_name_ = std::to_string(channel_id);
+PosixSegment::PosixSegment(uint64_t channel_id) : Segment(channel_id), mapped_size_(0) {
+    shm_name_ = "/cmw_" + std::to_string(channel_id);
 }
 
-PosixSegment::~PosixSegment() { Destroy(); }
+PosixSegment::~PosixSegment() {
+    Destroy();
+    Reset();
+}
 
 //创建共享内存块
 bool PosixSegment::OpenOrCreate() {
@@ -40,6 +45,7 @@ bool PosixSegment::OpenOrCreate() {
     if(ftruncate(fd , conf_.managed_shm_size()) < 0){
         std::cout << "ftruncate failed: " << strerror(errno);
         close(fd);
+        shm_unlink(shm_name_.c_str());
         return false;
     }
 
@@ -50,18 +56,21 @@ bool PosixSegment::OpenOrCreate() {
     //如果映射失败
     if(managed_shm_ == MAP_FAILED){
         std::cout << "attach shm failed:" << strerror(errno);
+        managed_shm_ = nullptr;
         close(fd);
         shm_unlink(shm_name_.c_str());  //删除共享内存对象
         return false;
     }
 
     close(fd);
+    mapped_size_ = conf_.managed_shm_size();
 
     state_ = new (managed_shm_) State(conf_.ceiling_msg_size());  //在共享内存起始地址创建一个State对象
     if( state_ == nullptr ){
         std::cout << "create state failed.";
-        munmap(managed_shm_, conf_.managed_shm_size());  //解除映射
+        munmap(managed_shm_, mapped_size_);  //解除映射
         managed_shm_ = nullptr;
+        mapped_size_ = 0;
         shm_unlink(shm_name_.c_str());
         return false;
     }
@@ -73,8 +82,9 @@ bool PosixSegment::OpenOrCreate() {
         std::cout << "create blocks failed." << std::endl;
         state_->~State();
         state_ = nullptr;
-        munmap(managed_shm_, conf_.managed_shm_size());
+        munmap(managed_shm_, mapped_size_);
         managed_shm_ = nullptr;
+        mapped_size_ = 0;
         shm_unlink(shm_name_.c_str());
         return false;
     }
@@ -104,8 +114,9 @@ bool PosixSegment::OpenOrCreate() {
         std::lock_guard<std::mutex> lg(block_buf_lock_);
         block_buf_addrs_.clear();
         }
-        munmap(managed_shm_, conf_.managed_shm_size());
+        munmap(managed_shm_, mapped_size_);
         managed_shm_ = nullptr;
+        mapped_size_ = 0;
         shm_unlink(shm_name_.c_str());
         return false;
     }
@@ -135,6 +146,11 @@ bool PosixSegment::OpenOnly(){
         close(fd);
         return false;
     }
+    if(file_attr.st_size <= 0){
+        std::cout << "invalid shm size." << std::endl;
+        close(fd);
+        return false;
+    }
 
     //映射共享内存
     managed_shm_ = mmap(nullptr, file_attr.st_size, PROT_READ | PROT_WRITE,
@@ -143,29 +159,38 @@ bool PosixSegment::OpenOnly(){
     //如果映射失败
     if(managed_shm_ == MAP_FAILED){
         std::cout << "attach shm failed:" << strerror(errno);
+        managed_shm_ = nullptr;
         close(fd);
         return false;
     }
 
-    close(fd);  
+    close(fd);
+    mapped_size_ = static_cast<std::size_t>(file_attr.st_size);
     //直接转换
     state_ = reinterpret_cast<State*>(managed_shm_);         
     if (state_ == nullptr) {
         std::cout << "get state failed." << std::endl;
-        munmap(managed_shm_, file_attr.st_size);
+        munmap(managed_shm_, mapped_size_);
         managed_shm_ = nullptr;
+        mapped_size_ = 0;
         return false;
     }
 
     conf_.Update(state_->ceiling_msg_size());
+    if(mapped_size_ < conf_.managed_shm_size()){
+        std::cout << "shm size is too small." << std::endl;
+        Reset();
+        return false;
+    }
 
     blocks_ = reinterpret_cast<Block*>(static_cast<char*>(managed_shm_) + sizeof(State));
 
     if(blocks_ == nullptr){
         std::cout << "get blocks failed." << std::endl;
         state_ = nullptr;
-        munmap(managed_shm_, conf_.managed_shm_size());
+        munmap(managed_shm_, mapped_size_);
         managed_shm_ = nullptr;
+        mapped_size_ = 0;
         return false;
     }
 
@@ -175,20 +200,24 @@ bool PosixSegment::OpenOnly(){
         uint8_t* addr = reinterpret_cast<uint8_t*>(
                 static_cast<char*>(managed_shm_) + sizeof(State) + 
                 conf_.block_num() * sizeof(Block) + i * conf_.block_buf_size());
+        if(addr == nullptr){
+            break;
+        }
+        std::lock_guard<std::mutex> lg(block_buf_lock_);
+        block_buf_addrs_[i] = addr;
     }
 
     if (i != conf_.block_num()) {
         std::cout << "open only failed." << std::endl;
-        state_->~State();
         state_ = nullptr;
         blocks_ = nullptr;
         {
         std::lock_guard<std::mutex> lg(block_buf_lock_);
         block_buf_addrs_.clear();
         }
-        munmap(managed_shm_, conf_.managed_shm_size());
+        munmap(managed_shm_, mapped_size_);
         managed_shm_ = nullptr;
-        shm_unlink(shm_name_.c_str());
+        mapped_size_ = 0;
         return false;
    }
 
@@ -216,8 +245,9 @@ void PosixSegment::Reset() {
     block_buf_addrs_.clear();  // 清空buf 管理map
   }
   if (managed_shm_ != nullptr) {
-    munmap(managed_shm_, conf_.managed_shm_size()); //解除共享内存映射
+    munmap(managed_shm_, mapped_size_); //解除共享内存映射
     managed_shm_ = nullptr;
+    mapped_size_ = 0;
     return;
   }
 }

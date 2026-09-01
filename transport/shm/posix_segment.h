@@ -5,6 +5,7 @@
 
 
 #include <string>
+#include <cstddef>
 #include <cmw/transport/shm/segment.h>
 
 namespace hnu{
@@ -25,6 +26,7 @@ class PosixSegment : public Segment{
         bool OpenOrCreate() override;
 
         std::string shm_name_;
+        std::size_t mapped_size_;
 
 };
 
