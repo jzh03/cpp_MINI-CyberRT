@@ -14,6 +14,10 @@
 #include <cmw/common/log.h>
 #include <cmw/transport/transmitter/shm_transmitter.h>
 #include <cmw/transport/receiver/shm_receiver.h>
+#include <cmw/transport/transmitter/intra_transmitter.h>
+#include <cmw/transport/receiver/intra_receiver.h>
+#include <cmw/transport/transmitter/hybrid_transmitter.h>
+#include <cmw/transport/receiver/hybrid_receiver.h>
 
 namespace hnu    {
 namespace cmw   {
@@ -34,14 +38,14 @@ public:
     //返回一个Transmitter的指针
     template <typename M>
     auto CreateTransmitter(const RoleAttributes& attr,
-                           const OptionalMode& mode = OptionalMode::RTPS) ->
+                           const OptionalMode& mode = OptionalMode::HYBRID) ->
             typename std::shared_ptr<Transmitter<M>>;
     
     //返回一个Receiver的指针
     template <typename M>
     auto CreateReceiver(const RoleAttributes& attr,
                         const typename Receiver<M>::MessageListener& msg_listener,
-                        const OptionalMode& mode = OptionalMode::RTPS) ->
+                        const OptionalMode& mode = OptionalMode::HYBRID) ->
             typename std::shared_ptr<Receiver<M>>;
 
     //返回在构造函数中创建的participant_
@@ -72,19 +76,28 @@ auto Transport::CreateTransmitter(const RoleAttributes& attr,
     RoleAttributes modified_attr = attr ;
 
 
-    //默认走fast-rtps
     switch (mode)
     {
-        case OptionalMode::SHM: 
+        case OptionalMode::INTRA:
+            transmitter = std::make_shared<IntraTransmitter<M>>(modified_attr);
+            break;
+        case OptionalMode::SHM:
             transmitter = std::make_shared<ShmTransmitter<M>>(modified_attr);
             break;
-        default:
+        case OptionalMode::RTPS:
             transmitter = std::make_shared<RtpsTransmitter<M>>(modified_attr , participant());
             break;
+        case OptionalMode::HYBRID:
+            transmitter = std::make_shared<HybridTransmitter<M>>(
+                modified_attr, participant());
+            break;
+        default:
+            return nullptr;
     }
 
     RETURN_VAL_IF_NULL(transmitter, nullptr);
 
+    // 显式模式保持原有立即启用语义；HYBRID 等待 Discovery 提供对端属性。
     if( mode != OptionalMode::HYBRID){
         ADEBUG << "transmitter Enable";
         transmitter->Enable();
@@ -111,17 +124,26 @@ auto Transport::CreateReceiver(const RoleAttributes& attr,
     ADEBUG << "Receiver Mode: " << mode;
     switch (mode)
     {
+        case OptionalMode::INTRA:
+            receiver = std::make_shared<IntraReceiver<M>>(modified_attr, msg_listener);
+            break;
         case OptionalMode::SHM:
             receiver = std::make_shared<ShmReceiver<M>>(modified_attr, msg_listener);
             break;
-        default:
+        case OptionalMode::RTPS:
             receiver = std::make_shared<RtpsReceiver<M>>(modified_attr , msg_listener);
             break;
+        case OptionalMode::HYBRID:
+            receiver = std::make_shared<HybridReceiver<M>>(modified_attr, msg_listener);
+            break;
+        default:
+            return nullptr;
     }
 
     //保证receiver不为空
     RETURN_VAL_IF_NULL(receiver, nullptr);
 
+    // HYBRID Receiver 由 Publisher JOIN/LEAVE 驱动具体接收路径。
     if (mode != OptionalMode::HYBRID) {
         receiver->Enable();
     }

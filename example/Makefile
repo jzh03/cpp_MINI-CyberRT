@@ -63,7 +63,13 @@ TEST_TARGETS := test_writer test_reader test_serialize test_node_manager \
                 test_scheduler test_task test_blocker test_class_loader \
                 test_node test_publisher_subscriber \
                 test_shm_segment_robustness test_shm_dispatcher_robustness \
-                test_shm_transmitter_receiver
+                test_posix_segment_multiprocess \
+                test_shm_transmitter_receiver test_transport_mode_selection \
+                test_hybrid_intra test_hybrid_shm_multiprocess \
+                test_rtps_same_host_multiprocess test_hybrid_dynamic_intra \
+                test_hybrid_dynamic_shm_lifecycle \
+                test_rtps_lifecycle_regression
+BENCHMARK_TARGETS := shm_segment_benchmark
 CLASS_LOADER_PLUGIN_DIR := $(PROJECT_ROOT)/class_loader/test
 CLASS_LOADER_PLUGINS := $(CLASS_LOADER_PLUGIN_DIR)/libplugin1.so \
                         $(CLASS_LOADER_PLUGIN_DIR)/libplugin2.so
@@ -82,7 +88,7 @@ FAST_DDS_REQUIRED := \
 
 .DEFAULT_GOAL := all
 
-.PHONY: all publisher subscriber tests $(TEST_TARGETS) check-fastdds clean
+.PHONY: all publisher subscriber tests $(TEST_TARGETS) $(BENCHMARK_TARGETS) check-fastdds clean
 .SECONDARY: $(TEST_CORE_OBJS) \
             $(addprefix $(OBJ_DIR)/example/,$(addsuffix .o,$(TEST_TARGETS)))
 
@@ -95,6 +101,8 @@ subscriber: $(SUBSCRIBER_BIN)
 tests: $(TEST_TARGETS)
 
 $(TEST_TARGETS): %: $(BIN_DIR)/%
+
+$(BENCHMARK_TARGETS): %: $(BIN_DIR)/%
 
 test_class_loader: $(CLASS_LOADER_PLUGINS)
 
@@ -113,6 +121,9 @@ $(BIN_DIR)/test_class_loader: LDFLAGS += -Wl,--export-dynamic
 
 $(BIN_DIR)/test_%: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/test_%.o Makefile | check-fastdds $(BIN_DIR)
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS) -lgtest
+
+$(BIN_DIR)/shm_segment_benchmark: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/shm_segment_benchmark.o Makefile | check-fastdds $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
 
 $(CLASS_LOADER_PLUGIN_DIR)/lib%.so: $(CLASS_LOADER_PLUGIN_DIR)/%.cc | $(CMW_INCLUDE_LINK)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared -fPIC -o $@ $^ -lpthread -ldl
@@ -135,3 +146,4 @@ $(BIN_DIR):
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(CLASS_LOADER_PLUGINS)
+	rm -f $(CURDIR)/*.log

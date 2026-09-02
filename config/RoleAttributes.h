@@ -29,7 +29,7 @@ struct RoleAttributes : public Serializable
     
     std::string message_type;    // 消息类型
 
-    SERIALIZE(host_name,host_ip,process_id,channel_name,qos_profile,id,node_name,node_id,message_type)
+    SERIALIZE(host_name,host_ip,process_id,channel_name,channel_id,qos_profile,id,node_name,node_id,message_type)
 };
 
 

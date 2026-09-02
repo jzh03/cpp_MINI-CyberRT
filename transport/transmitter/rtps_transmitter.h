@@ -50,7 +50,8 @@ private:
 template <typename M>
 RtpsTransmitter<M>::RtpsTransmitter(const RoleAttributes& attr,
                                     const ParticipantPtr& participant)
-        :Transmitter<M>(attr) , participant_(participant) , rtps_writer(nullptr) {}
+        :Transmitter<M>(attr) , participant_(participant) , rtps_writer(nullptr),
+         mp_history(nullptr) {}
 
 
 template <typename M>
@@ -65,6 +66,15 @@ void RtpsTransmitter<M>::Enable(){
         return;
     }
 
+    if (participant_ == nullptr || participant_->is_shutdown()) {
+        return;
+    }
+
+    auto* participant = participant_->fastrtps_participant();
+    if (participant == nullptr) {
+        return;
+    }
+
     // 创建 RtpsWriter 的配置信息实例
     RtpsWriterAttributes writer_attr;
     // 填充 RtpsWriter 的配置信息
@@ -75,23 +85,42 @@ void RtpsTransmitter<M>::Enable(){
     mp_history = new WriterHistory(writer_attr.hatt);
 
     //创建rtps writer
-    rtps_writer  = RTPSDomain::createRTPSWriter(participant_->fastrtps_participant(), writer_attr.watt , mp_history);
+    rtps_writer  = RTPSDomain::createRTPSWriter(participant, writer_attr.watt , mp_history);
+    if (rtps_writer == nullptr) {
+      delete mp_history;
+      mp_history = nullptr;
+      return;
+    }
+
     //注册rtps writer
-    bool reg = participant_->fastrtps_participant()->registerWriter(rtps_writer , writer_attr.Tatt , writer_attr.Wqos);
+    bool reg = participant->registerWriter(rtps_writer , writer_attr.Tatt , writer_attr.Wqos);
 
     if(reg)
     {
       this->enabled_ = true;
+    } else {
+      RTPSDomain::removeRTPSWriter(rtps_writer);
+      rtps_writer = nullptr;
+      delete mp_history;
+      mp_history = nullptr;
     }
 
 }
 
 template <typename M>
 void RtpsTransmitter<M>::Disable() {
-  if (this->enabled_) {
+  if (rtps_writer != nullptr) {
+    // Writer 由 RTPSDomain 删除；其关联的 History 仍由调用方负责释放。
+    if (!participant_->is_shutdown()) {
+      RTPSDomain::removeRTPSWriter(rtps_writer);
+    }
     rtps_writer = nullptr;
-    this->enabled_ = false;
   }
+  if (mp_history != nullptr) {
+    delete mp_history;
+    mp_history = nullptr;
+  }
+  this->enabled_ = false;
 }
 
 
