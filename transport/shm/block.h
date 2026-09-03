@@ -23,6 +23,9 @@ public:
     void set_msg_info_size(uint64_t msg_info_size) {
         msg_info_size_ = msg_info_size;
     }
+    uint64_t generation() const {
+        return generation_.load(std::memory_order_relaxed);
+    }
 
     static const int32_t kRWLockFree;
     static const int32_t kWriteExclusive;
@@ -33,8 +36,10 @@ private:
     bool TryLockForRead();
     void ReleaseWriteLock();
     void ReleaseReadLock();
+    void IncreaseGeneration();
 
     std::atomic<int32_t> lock_num_ = {0};
+    std::atomic<uint64_t> generation_ = {0};
     uint64_t msg_size_;
     uint64_t msg_info_size_;
 };

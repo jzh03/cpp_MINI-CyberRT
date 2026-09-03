@@ -64,6 +64,7 @@ TEST_TARGETS := test_writer test_reader test_serialize test_node_manager \
                 test_node test_publisher_subscriber \
                 test_shm_segment_robustness test_shm_dispatcher_robustness \
                 test_posix_segment_multiprocess \
+                test_shm_block_lease_generation \
                 test_shm_transmitter_receiver test_transport_mode_selection \
                 test_hybrid_intra test_hybrid_shm_multiprocess \
                 test_rtps_same_host_multiprocess test_hybrid_dynamic_intra \

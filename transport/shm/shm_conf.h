@@ -21,11 +21,11 @@ public:
 
     void Update(const uint64_t& real_msg_size);
 
-    const uint64_t& ceiling_msg_size() { return ceiling_msg_size_; }
-    const uint64_t& max_message_size() { return MESSAGE_SIZE_MORE; }
-    const uint64_t& block_buf_size()  { return block_buf_size_; }
-    const uint64_t& block_num()  { return block_num_; }
-    const uint64_t& managed_shm_size() { return managed_shm_size_; }
+    const uint64_t& ceiling_msg_size() const { return ceiling_msg_size_; }
+    const uint64_t& max_message_size() const { return MESSAGE_SIZE_MORE; }
+    const uint64_t& block_buf_size() const { return block_buf_size_; }
+    const uint64_t& block_num() const { return block_num_; }
+    const uint64_t& managed_shm_size() const { return managed_shm_size_; }
 
 private:
 

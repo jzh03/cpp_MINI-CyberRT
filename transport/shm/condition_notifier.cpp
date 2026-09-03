@@ -11,8 +11,13 @@ namespace transport{
 
 using common::Hash;
 
-ConditionNotifier::ConditionNotifier(){
-    key_ = static_cast<key_t>(Hash("/hnu/cmw/transport/shm/notifier"));
+ConditionNotifier::ConditionNotifier()
+    : ConditionNotifier(
+          static_cast<key_t>(Hash("/hnu/cmw/transport/shm/notifier")), false)
+{}
+
+ConditionNotifier::ConditionNotifier(key_t key, bool remove_on_shutdown)
+    : key_(key), remove_on_shutdown_(remove_on_shutdown){
     shm_size_ = sizeof(Indicator);
 
     if(!Init()){
@@ -21,7 +26,7 @@ ConditionNotifier::ConditionNotifier(){
         return;
     }
 
-    next_seq_ = indicator_->next_seq.load();
+    next_seq_ = indicator_->next_seq.load(std::memory_order_relaxed);
     ADEBUG << "next_seq: " << next_seq_;
 }
 
@@ -31,8 +36,11 @@ void ConditionNotifier::Shutdown( ){
     if(is_shutdown_.exchange(true)){
         return;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     Reset();
+    if(remove_on_shutdown_ && created_){
+        Remove();
+        created_ = false;
+    }
 }
 
 
@@ -42,12 +50,12 @@ bool ConditionNotifier::Notify(const ReadableInfo& info){
         return false;
     }
     //先取到next_seq，再对next_seq+1
-    uint64_t seq = indicator_->next_seq.fetch_add(1);
+    uint64_t seq = indicator_->next_seq.fetch_add(1, std::memory_order_relaxed);
 
     //填充要通知的信息
     uint64_t idx = seq % kBufLength;
     indicator_->infos[idx] = info;
-    indicator_->seqs[idx] = seq;
+    indicator_->seqs[idx].store(seq, std::memory_order_release);
 
     return true;
 }
@@ -66,12 +74,13 @@ bool ConditionNotifier::Listen(int timeout_ms ,ReadableInfo* info){
     while (!is_shutdown_.load())
     {   
         
-        uint64_t seq = indicator_->next_seq.load();
+        uint64_t seq = indicator_->next_seq.load(std::memory_order_relaxed);
 
         //如果有其他进程 执行了Notify，则 seq != next_seq_ ,说明有新的info
         if(seq != next_seq_){
             auto idx = next_seq_ % kBufLength;
-            auto actual_seq = indicator_->seqs[idx];
+            auto actual_seq =
+                indicator_->seqs[idx].load(std::memory_order_acquire);
             //
             if(actual_seq >= next_seq_){
                 next_seq_ = actual_seq;
@@ -100,26 +109,10 @@ bool ConditionNotifier::Init() { return OpenOrCreate(); }
 
 
 bool ConditionNotifier::OpenOrCreate(){
-    int retry = 0;
-    int shmid = 0;
-    while (retry < 2)
-    {
-        shmid = shmget(key_, shm_size_, 0644 | IPC_CREAT | IPC_EXCL);
-        if(shmid != -1){
-            break;
-        }
-
-        if(EINVAL == errno){
-            AINFO << "need larger space, recreate.";
-            Reset();
-            Remove();
-            ++retry;
-        } else if( EEXIST == errno){
-            ADEBUG << "shm already exist, open only.";
-            return OpenOnly();
-        } else {
-            break;
-        }
+    int shmid = shmget(key_, shm_size_, 0644 | IPC_CREAT | IPC_EXCL);
+    if(shmid == -1 && EEXIST == errno){
+        ADEBUG << "shm already exist, open only.";
+        return OpenOnly();
     }
 
     if(shmid == -1){
@@ -145,6 +138,8 @@ bool ConditionNotifier::OpenOrCreate(){
         return false;
     }
 
+    created_ = true;
+
     ADEBUG  << "open or create true.";
     return true;
     
@@ -156,6 +151,16 @@ bool ConditionNotifier::OpenOnly(){
     if(shmid == -1){
         AERROR << "get shm failed, error: " << strerror(errno);
         return false; 
+    }
+
+    struct shmid_ds shm_info;
+    if(shmctl(shmid, IPC_STAT, &shm_info) == -1){
+        AERROR << "get notifier shm size failed, error: " << strerror(errno);
+        return false;
+    }
+    if(shm_info.shm_segsz != shm_size_){
+        AERROR << "incompatible notifier shm layout.";
+        return false;
     }
 
     //映射共享内存

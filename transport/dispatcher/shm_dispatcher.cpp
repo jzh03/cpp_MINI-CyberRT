@@ -58,19 +58,34 @@ void ShmDispatcher::AddSegment(const RoleAttributes& self_attr){
     previous_indexs_[channel_id] = UINT32_MAX;
 }
 
-void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index){
+void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index,
+                                uint64_t generation){
       ADEBUG << "Reading sharedmem message: "
          << GlobalData::GetChannelById(channel_id)
          << " from block: " << block_index;
       auto rb = std::make_shared<ReadableBlock>();
       rb->index = block_index;
       //读取共享内存保存到rb中
-      if( !segments_[channel_id]->AcquireBlockToRead(rb.get())){
+      SegmentPtr segment = segments_[channel_id];
+      if( !segment->AcquireBlockToRead(rb.get())){
         AWARN << "fail to acquire block, channel: "
           << GlobalData::GetChannelById(channel_id)
           << " index: " << block_index;
         return;
       }
+    ReadableBlockLease read_lease(segment, *rb);
+
+    if(rb->block->generation() != generation){
+        ADEBUG << "stale shm block generation, channel: "
+               << GlobalData::GetChannelById(channel_id)
+               << " index: " << block_index;
+        return;
+    }
+
+    if(rb->block->msg_info_size() < ID_SIZE * 2 + sizeof(uint64_t)){
+        AERROR << "invalid shm message info size.";
+        return;
+    }
 
     MessageInfo msg_info;
     const char* msg_info_addr = 
@@ -87,8 +102,6 @@ void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index){
     msg_info.set_seq_num(*(reinterpret_cast<uint64_t*>(const_cast<char*>(msg_info_addr+2*ID_SIZE))));
 
     OnMessage(channel_id,rb,msg_info);
-    //释放此block的读锁
-    segments_[channel_id]->ReleaseReadBlock(*rb);
 }
 
 void ShmDispatcher::ThreadFunc(){
@@ -108,6 +121,7 @@ void ShmDispatcher::ThreadFunc(){
 
         uint64_t channel_id  = readable_info.channel_id();
         uint32_t block_index = readable_info.block_index();
+        uint64_t generation = readable_info.generation();
 
         {
             ReadLockGuard<AtomicRWLock> lg(segments_lock_);
@@ -135,7 +149,7 @@ void ShmDispatcher::ThreadFunc(){
             } 
             //更新上一次的索引
             previous_index = block_index;
-            ReadMessage(channel_id, block_index);
+            ReadMessage(channel_id, block_index, generation);
         }
     }
     

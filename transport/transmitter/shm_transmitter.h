@@ -104,6 +104,7 @@ bool ShmTransmitter<M>::Transmit(const M& msg, const MessageInfo& msg_info){
         AERROR << "acquire block failed.";
         return false;
     }
+    WritableBlockLease write_lease(segment_, wb);
 
     //拷贝序列化后的数据到wb.buf处
     std::memcpy(wb.buf , ds.data(), msg_size);
@@ -122,15 +123,17 @@ bool ShmTransmitter<M>::Transmit(const M& msg, const MessageInfo& msg_info){
 
     wb.block->set_msg_info_size(ID_SIZE*2 +sizeof(uint64_t));
 
+    const uint32_t block_index = wb.index;
+    const uint64_t generation = wb.generation;
     //释放此block的写锁
-    segment_->ReleaseWrittenBlock(wb);
+    write_lease.Release();
 
     //新建一个ReadableInfo
-    ReadableInfo readable_info(host_id_, wb.index , channel_id_);
+    ReadableInfo readable_info(host_id_, block_index, channel_id_, generation);
 
     ADEBUG << "Writing sharedmem message: "
          << common::GlobalData::GetChannelById(channel_id_)
-         << " to block: " << wb.index;
+         << " to block: " << block_index;
     //通知接收数据的进程处理数据,发送ReadableInfo
     return notifier_->Notify(readable_info);
 

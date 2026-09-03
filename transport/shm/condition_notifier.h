@@ -11,6 +11,7 @@
 
 #include <cmw/transport/shm/notifier_base.h>
 #include <atomic>
+#include <sys/ipc.h>
 #include <cmw/common/macros.h>
 
 namespace hnu{
@@ -21,12 +22,19 @@ const uint32_t kBufLength = 4096;
 class ConditionNotifier : public NotifierBase{
 
     struct Indicator{
-        std::atomic<uint64_t> next_seq = {0};
+        Indicator() : next_seq(1) {
+            for(uint32_t i = 0; i < kBufLength; ++i){
+                seqs[i].store(0, std::memory_order_relaxed);
+            }
+        }
+
+        std::atomic<uint64_t> next_seq;
         ReadableInfo infos[kBufLength];
-        uint64_t seqs[kBufLength] = {0};
+        std::atomic<uint64_t> seqs[kBufLength];
     };
 
     public:
+        ConditionNotifier(key_t key, bool remove_on_shutdown);
         virtual ~ConditionNotifier();
         void Shutdown() override;
         bool Notify(const ReadableInfo& info) override;
@@ -45,6 +53,8 @@ class ConditionNotifier : public NotifierBase{
         Indicator* indicator_ = nullptr;
         uint64_t next_seq_ = 0;
         std::atomic<bool> is_shutdown_ = {false};
+        bool remove_on_shutdown_ = false;
+        bool created_ = false;
         DECLARE_SINGLETON(ConditionNotifier)
 };
 

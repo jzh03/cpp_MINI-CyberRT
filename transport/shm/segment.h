@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include <cmw/transport/shm/block.h>
 #include <cmw/transport/shm/shm_conf.h>
@@ -25,6 +26,7 @@ using SegmentPtr = std::shared_ptr<Segment>;
 struct WritableBlock
 {
     uint32_t index = 0;
+    uint64_t generation = 0;
     Block* block = nullptr;
     uint8_t* buf = nullptr;
 };
@@ -50,6 +52,8 @@ protected:
     virtual bool Remove() = 0;
     virtual bool OpenOnly() = 0;
     virtual bool OpenOrCreate() = 0;
+    bool InitializeLayout();
+    bool HasValidLayout() const;
     bool init_;
     ShmConf conf_;
     uint64_t channel_id_;
@@ -64,6 +68,50 @@ private:
     bool Remap();
     bool Recreate(const uint64_t& msg_size);
     uint32_t GetNextWritableBlockIndex();
+};
+
+class WritableBlockLease
+{
+public:
+    WritableBlockLease() = default;
+    WritableBlockLease(const SegmentPtr& segment, const WritableBlock& block);
+    ~WritableBlockLease();
+
+    WritableBlockLease(const WritableBlockLease&) = delete;
+    WritableBlockLease& operator=(const WritableBlockLease&) = delete;
+    WritableBlockLease(WritableBlockLease&& other) noexcept;
+    WritableBlockLease& operator=(WritableBlockLease&& other) noexcept;
+
+    explicit operator bool() const { return owns_block_; }
+    const WritableBlock& block() const { return block_; }
+    void Release();
+
+private:
+    SegmentPtr segment_;
+    WritableBlock block_;
+    bool owns_block_ = false;
+};
+
+class ReadableBlockLease
+{
+public:
+    ReadableBlockLease() = default;
+    ReadableBlockLease(const SegmentPtr& segment, const ReadableBlock& block);
+    ~ReadableBlockLease();
+
+    ReadableBlockLease(const ReadableBlockLease&) = delete;
+    ReadableBlockLease& operator=(const ReadableBlockLease&) = delete;
+    ReadableBlockLease(ReadableBlockLease&& other) noexcept;
+    ReadableBlockLease& operator=(ReadableBlockLease&& other) noexcept;
+
+    explicit operator bool() const { return owns_block_; }
+    const ReadableBlock& block() const { return block_; }
+    void Release();
+
+private:
+    SegmentPtr segment_;
+    ReadableBlock block_;
+    bool owns_block_ = false;
 };
 
 

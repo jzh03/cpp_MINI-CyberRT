@@ -37,7 +37,8 @@ public:
 
 private:
     void AddSegment(const RoleAttributes& self_attr);
-    void ReadMessage(uint64_t channel_id, uint32_t block_index);
+    void ReadMessage(uint64_t channel_id, uint32_t block_index,
+                     uint64_t generation);
     void OnMessage(uint64_t channel_id, const std::shared_ptr<ReadableBlock>& rb,
                     const MessageInfo& msg_info);
     void ThreadFunc();
@@ -65,7 +66,10 @@ void ShmDispatcher::AddListener(const RoleAttributes& self_attr,
            auto msg = std::make_shared<MessageT>();
             //数据反序列化
            serialize::DataStream ds(reinterpret_cast<char*>(rb->buf) , rb->block->msg_size());
-           ds >> *msg;
+           if(!ds.read(*msg)){
+               AERROR << "failed to deserialize shm message.";
+               return;
+           }
            //执行回调
            listener(msg, msg_info);
         };
@@ -84,7 +88,10 @@ void ShmDispatcher::AddListener(const RoleAttributes& self_attr,
     auto msg = std::make_shared<MessageT>();
     //数据反序列化
     serialize::DataStream ds(reinterpret_cast<char*>(rb->buf) , rb->block->msg_size());
-    ds >> *msg;
+    if(!ds.read(*msg)){
+        AERROR << "failed to deserialize shm message.";
+        return;
+    }
     listener(msg, msg_info);
   };
 
