@@ -2,6 +2,7 @@
 #define CMW_TRANSPORT_TRANSMITTER_TRANSMITTER_H_
 
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -14,6 +15,8 @@ namespace cmw   {
 namespace transport {
 
 using namespace event;
+class LoanedMessage;
+
 template <typename M>
 class Transmitter: public Endpoint
 {
@@ -34,6 +37,20 @@ public:
 
     virtual bool Transmit(const MessagePtr& msg);
     virtual bool Transmit(const MessagePtr& msg, const MessageInfo& msg_info) = 0;
+
+    virtual std::unique_ptr<LoanedMessage> AcquireLoanedMessage(
+        std::size_t capacity) {
+        (void)capacity;
+        return nullptr;
+    }
+
+    virtual bool TransmitLoanedMessage(std::unique_ptr<LoanedMessage> message);
+    virtual bool TransmitLoanedMessage(std::unique_ptr<LoanedMessage> message,
+                                       const MessageInfo& msg_info) {
+        (void)message;
+        (void)msg_info;
+        return false;
+    }
 
     uint64_t NextSeqNum() { return ++seq_num_; }
     uint64_t seq_num() const { return seq_num_; }
@@ -68,6 +85,19 @@ bool Transmitter<M>::Transmit(const MessagePtr& msg){
     
     return Transmit(msg, msg_info_);
 
+}
+
+template <typename M>
+bool Transmitter<M>::TransmitLoanedMessage(
+    std::unique_ptr<LoanedMessage> message) {
+    if(message == nullptr) {
+        return false;
+    }
+
+    msg_info_.set_seq_num(NextSeqNum());
+    PerfEventCache::Instance()->AddTransportEvent(
+        TransPerf::TRANSMIT_BEGIN, attr_.channel_id, msg_info_.seq_num());
+    return TransmitLoanedMessage(std::move(message), msg_info_);
 }
 
 template <typename M>

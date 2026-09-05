@@ -1,12 +1,15 @@
 #ifndef CMW_NODE_PUBLISHER_H_
 #define CMW_NODE_PUBLISHER_H_
 
+#include <cstddef>
 #include <memory>
+#include <type_traits>
 #include <cmw/node/publisher_base.h>
 #include <cmw/transport/transport.h>
 #include <cmw/discovery/topology_manager.h>
 #include <cmw/transport/transmitter/transmitter.h>
 #include <cmw/transport/transmitter/rtps_transmitter.h>
+#include <cmw/transport/message/loaned_message.h>
 #include <cmw/common/log.h>
 namespace hnu    {
 namespace cmw   {
@@ -33,7 +36,20 @@ public:
     virtual bool Publish(const MessageT& msg);
     virtual bool Publish(const std::shared_ptr<MessageT>& msg_ptr);
 
+    template <typename T = MessageT>
+    typename std::enable_if<
+        std::is_same<T, transport::LoanedMessage>::value,
+        std::unique_ptr<transport::LoanedMessage>>::type
+    AcquireMessage(std::size_t capacity);
+
+    template <typename T = MessageT>
+    typename std::enable_if<
+        std::is_same<T, transport::LoanedMessage>::value, bool>::type
+    Publish(std::unique_ptr<transport::LoanedMessage> message);
+
 private:
+    bool PublishImpl(const MessageT& msg, std::false_type);
+    bool PublishImpl(const MessageT& msg, std::true_type);
     void JoinTheTopology();
     void LeaveTheTopology();
     void OnChannelChange(const ChangeMsg& change_msg);
@@ -92,14 +108,50 @@ void Publisher<MessageT>::Shutdown(){
 template<typename MessageT>
 bool Publisher<MessageT>::Publish(const MessageT& msg){
     RETURN_VAL_IF(!PublisherBase::IsInit() , false);
+    return PublishImpl(msg,
+        typename std::is_same<MessageT, transport::LoanedMessage>::type());
+}
+
+template<typename MessageT>
+bool Publisher<MessageT>::PublishImpl(const MessageT& msg, std::false_type){
     auto msg_ptr = std::make_shared<MessageT>(msg);
     return Publish(msg_ptr);
+}
+
+template<typename MessageT>
+bool Publisher<MessageT>::PublishImpl(const MessageT& msg, std::true_type){
+    (void)msg;
+    AERROR << "LoanedMessage must be published with Publish(std::unique_ptr).";
+    return false;
 }
 
 template<typename MessageT>
 bool Publisher<MessageT>::Publish(const std::shared_ptr<MessageT>& msg_ptr){
     RETURN_VAL_IF(!PublisherBase::IsInit(), false);
     return transmitter_->Transmit(msg_ptr);
+}
+
+template<typename MessageT>
+template<typename T>
+typename std::enable_if<
+    std::is_same<T, transport::LoanedMessage>::value,
+    std::unique_ptr<transport::LoanedMessage>>::type
+Publisher<MessageT>::AcquireMessage(std::size_t capacity) {
+    if(!PublisherBase::IsInit() || transmitter_ == nullptr) {
+        return nullptr;
+    }
+    return transmitter_->AcquireLoanedMessage(capacity);
+}
+
+template<typename MessageT>
+template<typename T>
+typename std::enable_if<
+    std::is_same<T, transport::LoanedMessage>::value, bool>::type
+Publisher<MessageT>::Publish(std::unique_ptr<transport::LoanedMessage> message) {
+    if(!PublisherBase::IsInit() || transmitter_ == nullptr) {
+        return false;
+    }
+    return transmitter_->TransmitLoanedMessage(std::move(message));
 }
 
 template<typename MessageT>

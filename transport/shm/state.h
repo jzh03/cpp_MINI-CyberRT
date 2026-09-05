@@ -3,12 +3,19 @@
 
 
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <mutex>
 
 namespace hnu{
 namespace cmw{
 namespace transport{
+
+enum class ShmMessageType : uint8_t {
+    UNKNOWN = 0,
+    SERIALIZED = 1,
+    LOANED = 2,
+};
 
 class State
 {
@@ -46,12 +53,30 @@ public:
     //返回引用计数
     uint32_t reference_counts() { return reference_count_.load(); }
 
+    bool TrySetMessageType(ShmMessageType message_type) {
+        if(message_type == ShmMessageType::UNKNOWN) {
+            return true;
+        }
+        uint8_t expected = static_cast<uint8_t>(ShmMessageType::UNKNOWN);
+        return message_type_.compare_exchange_strong(
+                   expected, static_cast<uint8_t>(message_type),
+                   std::memory_order_acq_rel, std::memory_order_acquire) ||
+               expected == static_cast<uint8_t>(message_type);
+    }
+
+    ShmMessageType message_type() const {
+        return static_cast<ShmMessageType>(
+            message_type_.load(std::memory_order_acquire));
+    }
+
     
 private:
     std::atomic<bool> need_remap_ = {false};
     std::atomic<uint32_t> seq_ = {0};
     std::atomic<uint32_t> reference_count_ = {0};
     std::atomic<uint64_t> ceiling_msg_size_;
+    std::atomic<uint8_t> message_type_ = {
+        static_cast<uint8_t>(ShmMessageType::UNKNOWN)};
 
 };
 

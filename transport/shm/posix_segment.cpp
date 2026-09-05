@@ -15,7 +15,8 @@ namespace hnu{
 namespace cmw{
 namespace transport{
 
-PosixSegment::PosixSegment(uint64_t channel_id) : Segment(channel_id), mapped_size_(0) {
+PosixSegment::PosixSegment(uint64_t channel_id, uint64_t initial_msg_size)
+    : Segment(channel_id, initial_msg_size), mapped_size_(0) {
     shm_name_ = "/cmw_" + std::to_string(channel_id);
 }
 

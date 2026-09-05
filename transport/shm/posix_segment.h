@@ -14,7 +14,8 @@ namespace transport{
 
 class PosixSegment : public Segment{
     public:
-        explicit PosixSegment(uint64_t channel_id);
+        explicit PosixSegment(uint64_t channel_id,
+                              uint64_t initial_msg_size = 0);
         virtual ~PosixSegment();
 
         static const char* Type() { return "posix"; }

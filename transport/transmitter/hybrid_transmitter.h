@@ -3,6 +3,7 @@
 
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 
 #include <cmw/config/transport_mode.h>
@@ -51,7 +52,9 @@ class HybridTransmitter : public Transmitter<M> {
     // 同一 peer 的重复 JOIN 不会重复初始化底层 Transport。
     peers->emplace(peer_key, opposite_attr);
     auto transmitter = GetTransmitter(mode);
-    transmitter->Enable();
+    if(transmitter != nullptr) {
+      transmitter->Enable();
+    }
   }
 
   void Disable(const RoleAttributes& opposite_attr) override {
@@ -69,11 +72,19 @@ class HybridTransmitter : public Transmitter<M> {
     if (peers->empty()) {
       // 只有最后一个同模式 peer 离开时，才关闭对应 Transport。
       auto transmitter = GetTransmitter(mode);
-      transmitter->Disable();
+      if(transmitter != nullptr) {
+        transmitter->Disable();
+      }
     }
   }
 
   bool Transmit(const MessagePtr& msg, const MessageInfo& msg_info) override {
+    return TransmitImpl(msg, msg_info,
+                        typename std::is_same<M, LoanedMessage>::type());
+  }
+
+  bool TransmitImpl(const MessagePtr& msg, const MessageInfo& msg_info,
+                    std::false_type) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (intra_peers_.empty() && shm_peers_.empty() && rtps_peers_.empty()) {
       return true;
@@ -96,7 +107,38 @@ class HybridTransmitter : public Transmitter<M> {
     return success;
   }
 
+  bool TransmitImpl(const MessagePtr& msg, const MessageInfo& msg_info,
+                    std::true_type) {
+    (void)msg;
+    (void)msg_info;
+    AERROR << "LoanedMessage must be published with Publish(std::unique_ptr).";
+    return false;
+  }
+
+  std::unique_ptr<LoanedMessage> AcquireLoanedMessage(
+      std::size_t capacity) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(!HasOnlyShmPeer()) {
+      return nullptr;
+    }
+    return GetTransmitter(OptionalMode::SHM)->AcquireLoanedMessage(capacity);
+  }
+
+  bool TransmitLoanedMessage(std::unique_ptr<LoanedMessage> message,
+                             const MessageInfo& msg_info) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(!HasOnlyShmPeer()) {
+      return false;
+    }
+    return GetTransmitter(OptionalMode::SHM)->TransmitLoanedMessage(
+        std::move(message), msg_info);
+  }
+
  private:
+  bool HasOnlyShmPeer() const {
+    return !shm_peers_.empty() && intra_peers_.empty() && rtps_peers_.empty();
+  }
+
   static std::string PeerKey(const RoleAttributes& attr) {
     // Discovery 正常路径使用 endpoint id；兜底键仅处理 id 尚未赋值的调用。
     if (attr.id != 0) {
@@ -120,6 +162,12 @@ class HybridTransmitter : public Transmitter<M> {
   }
 
   std::shared_ptr<Transmitter<M>> GetTransmitter(OptionalMode mode) {
+    return GetTransmitterImpl(mode,
+        typename std::is_same<M, LoanedMessage>::type());
+  }
+
+  std::shared_ptr<Transmitter<M>> GetTransmitterImpl(OptionalMode mode,
+                                                       std::false_type) {
     // 子 Transport 延迟创建，未被 Discovery 选中的模式不占用运行资源。
     switch (mode) {
       case OptionalMode::INTRA:
@@ -141,6 +189,17 @@ class HybridTransmitter : public Transmitter<M> {
       default:
         return nullptr;
     }
+  }
+
+  std::shared_ptr<Transmitter<M>> GetTransmitterImpl(OptionalMode mode,
+                                                       std::true_type) {
+    if(mode != OptionalMode::SHM) {
+      return nullptr;
+    }
+    if(shm_transmitter_ == nullptr) {
+      shm_transmitter_ = std::make_shared<ShmTransmitter<M>>(this->attr_);
+    }
+    return shm_transmitter_;
   }
 
   void DisablePeers(PeerMap& peers,

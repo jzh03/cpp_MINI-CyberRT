@@ -34,12 +34,30 @@ void ShmDispatcher::OnMessage(uint64_t channel_id,
     //根据channel_id 拿到对应的ListenerHandler
     if (msg_listeners_.Get(channel_id, &handler_base)){
         auto handler = std::dynamic_pointer_cast<ListenerHandler<ReadableBlock>>(*handler_base);
+        if(handler == nullptr) {
+            AERROR << "shm listener type does not match serialized message.";
+            return;
+        }
         //执行回调
         handler->Run(rb, msg_info);
     } else {
     AERROR << "Cannot find " << GlobalData::GetChannelById(channel_id)
            << "'s handler.";
   }
+}
+
+void ShmDispatcher::AddLoanedListener(
+    const RoleAttributes& self_attr,
+    const MessageListener<LoanedMessage>& listener) {
+    Dispatcher::AddListener<LoanedMessage>(self_attr, listener);
+    AddSegment(self_attr);
+}
+
+void ShmDispatcher::AddLoanedListener(
+    const RoleAttributes& self_attr, const RoleAttributes& opposite_attr,
+    const MessageListener<LoanedMessage>& listener) {
+    Dispatcher::AddListener<LoanedMessage>(self_attr, opposite_attr, listener);
+    AddSegment(self_attr);
 }
 
 
@@ -82,7 +100,13 @@ void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index,
         return;
     }
 
-    if(rb->block->msg_info_size() < ID_SIZE * 2 + sizeof(uint64_t)){
+    if(rb->block->msg_size() > segment->payload_capacity()) {
+        AERROR << "invalid shm payload size.";
+        return;
+    }
+
+    if(rb->block->msg_info_size() < ID_SIZE * 2 + sizeof(uint64_t) ||
+       rb->block->msg_info_size() > segment->message_info_capacity()){
         AERROR << "invalid shm message info size.";
         return;
     }
@@ -100,6 +124,27 @@ void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index,
     msg_info.set_spare_id(spare_id);
     //拷贝 seq
     msg_info.set_seq_num(*(reinterpret_cast<uint64_t*>(const_cast<char*>(msg_info_addr+2*ID_SIZE))));
+
+    if(segment->message_type() == ShmMessageType::LOANED) {
+        ListenerHandlerBasePtr* handler_base = nullptr;
+        if(!msg_listeners_.Get(channel_id, &handler_base)) {
+            AERROR << "Cannot find " << GlobalData::GetChannelById(channel_id)
+                   << "'s loaned handler.";
+            return;
+        }
+        auto handler = std::dynamic_pointer_cast<ListenerHandler<LoanedMessage>>(
+            *handler_base);
+        if(handler == nullptr) {
+            AERROR << "shm listener type does not match loaned message.";
+            return;
+        }
+
+        auto message = std::make_shared<LoanedMessage>(
+            rb->buf, rb->block->msg_size(), segment->payload_capacity(),
+            std::move(read_lease), channel_id, rb->index, generation);
+        handler->Run(message, msg_info);
+        return;
+    }
 
     OnMessage(channel_id,rb,msg_info);
 }

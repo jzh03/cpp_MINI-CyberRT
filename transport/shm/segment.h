@@ -37,14 +37,29 @@ class Segment
 {
 
 public:
-    explicit Segment(uint64_t channel_id);
+    explicit Segment(uint64_t channel_id, uint64_t initial_msg_size = 0);
     virtual ~Segment() {}
 
     bool AcquireBlockToWrite(std::size_t msg_size, WritableBlock* writable_block);
+    bool AcquireBlockToWrite(std::size_t msg_size, ShmMessageType message_type,
+                             WritableBlock* writable_block);
+    bool AcquireBlockToWriteWithoutRecreate(
+        std::size_t msg_size, ShmMessageType message_type,
+        WritableBlock* writable_block);
     void ReleaseWrittenBlock(const WritableBlock& writable_block);
 
     bool AcquireBlockToRead(ReadableBlock* readable_block);
     void ReleaseReadBlock(const ReadableBlock& readable_block);
+
+    uint64_t payload_capacity() const { return conf_.ceiling_msg_size(); }
+    uint64_t message_info_capacity() const {
+        return conf_.block_buf_size() - conf_.ceiling_msg_size();
+    }
+    uint64_t block_num() const { return conf_.block_num(); }
+    ShmMessageType message_type() const {
+        return state_ == nullptr ? ShmMessageType::UNKNOWN :
+               state_->message_type();
+    }
 
 protected:
     virtual bool Destroy();

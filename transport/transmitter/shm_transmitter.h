@@ -4,11 +4,13 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <type_traits>
 
 #include <cmw/common/global_data.h>
 #include <cmw/transport/shm/notifier_factory.h>
 #include <cmw/transport/shm/readable_info.h>
 #include <cmw/transport/shm/segment_factory.h>
+#include <cmw/transport/message/loaned_message.h>
 #include <cmw/transport/transmitter/transmitter.h>
 #include <cmw/common/util.h>
 #include <cmw/common/log.h>
@@ -24,6 +26,7 @@ class ShmTransmitter : public Transmitter<M> {
 
 public:
     using MessagePtr = std::shared_ptr<M>;
+    using Transmitter<M>::TransmitLoanedMessage;
 
     explicit ShmTransmitter(const RoleAttributes& attr);
     virtual ~ShmTransmitter();
@@ -33,8 +36,19 @@ public:
 
     bool Transmit(const MessagePtr& msg, const MessageInfo& info) override;
 
+    std::unique_ptr<LoanedMessage> AcquireLoanedMessage(
+        std::size_t capacity) override;
+    bool TransmitLoanedMessage(std::unique_ptr<LoanedMessage> message,
+                               const MessageInfo& msg_info) override;
+
 private:
     bool Transmit(const M& msg, const MessageInfo& msg_info);
+    bool TransmitImpl(const MessagePtr& msg, const MessageInfo& msg_info,
+                      std::false_type);
+    bool TransmitImpl(const MessagePtr& msg, const MessageInfo& msg_info,
+                      std::true_type);
+    uint64_t InitialSegmentMessageSize(std::true_type) const;
+    uint64_t InitialSegmentMessageSize(std::false_type) const;
 
     SegmentPtr segment_;
     uint64_t channel_id_;
@@ -62,7 +76,9 @@ void ShmTransmitter<M>::Enable(){
     if(this->enabled_){
         return;
     }
-    segment_ = SegmentFactory::CreateSegment(channel_id_);
+    segment_ = SegmentFactory::CreateSegment(
+        channel_id_, InitialSegmentMessageSize(
+                         typename std::is_same<M, LoanedMessage>::type()));
     notifier_ =NotifierFactory::CreateNotifier();
     this->enabled_ = true;
 }
@@ -79,7 +95,38 @@ void ShmTransmitter<M>::Disable(){
 template <typename M>
 bool ShmTransmitter<M>::Transmit(const MessagePtr& msg,
                                  const MessageInfo& msg_info) {
+  if(msg == nullptr) {
+    return false;
+  }
+  return TransmitImpl(msg, msg_info,
+                      typename std::is_same<M, LoanedMessage>::type());
+}
+
+template <typename M>
+bool ShmTransmitter<M>::TransmitImpl(const MessagePtr& msg,
+                                     const MessageInfo& msg_info,
+                                     std::false_type) {
   return Transmit(*msg, msg_info);
+}
+
+template <typename M>
+bool ShmTransmitter<M>::TransmitImpl(const MessagePtr& msg,
+                                     const MessageInfo& msg_info,
+                                     std::true_type) {
+  (void)msg;
+  (void)msg_info;
+  AERROR << "LoanedMessage must be published with Publish(std::unique_ptr).";
+  return false;
+}
+
+template <typename M>
+uint64_t ShmTransmitter<M>::InitialSegmentMessageSize(std::true_type) const {
+  return this->attr_.qos_profile.msg_size;
+}
+
+template <typename M>
+uint64_t ShmTransmitter<M>::InitialSegmentMessageSize(std::false_type) const {
+  return 0;
 }
 
 template <typename M>
@@ -100,7 +147,8 @@ bool ShmTransmitter<M>::Transmit(const M& msg, const MessageInfo& msg_info){
     ADEBUG << "Debug Serialize end: " << Time::Now().ToMicrosecond();
     
     //拿到一块block去写，并对拿到的这块block加上写锁
-    if(!segment_->AcquireBlockToWrite(msg_size, &wb)){
+    if(!segment_->AcquireBlockToWrite(msg_size, ShmMessageType::SERIALIZED,
+                                      &wb)){
         AERROR << "acquire block failed.";
         return false;
     }
@@ -137,6 +185,63 @@ bool ShmTransmitter<M>::Transmit(const M& msg, const MessageInfo& msg_info){
     //通知接收数据的进程处理数据,发送ReadableInfo
     return notifier_->Notify(readable_info);
 
+}
+
+template <typename M>
+std::unique_ptr<LoanedMessage> ShmTransmitter<M>::AcquireLoanedMessage(
+    std::size_t capacity) {
+  if(!std::is_same<M, LoanedMessage>::value || !this->enabled_ ||
+     segment_ == nullptr) {
+    return nullptr;
+  }
+  const uint32_t configured_capacity = this->attr_.qos_profile.msg_size;
+  if((configured_capacity != 0 && capacity > configured_capacity) ||
+     capacity == 0) {
+    AERROR << "invalid loaned message capacity: " << capacity;
+    return nullptr;
+  }
+
+  WritableBlock writable_block;
+  if(!segment_->AcquireBlockToWriteWithoutRecreate(
+         capacity, ShmMessageType::LOANED, &writable_block)) {
+    return nullptr;
+  }
+  WritableBlockLease write_lease(segment_, writable_block);
+  return std::unique_ptr<LoanedMessage>(new LoanedMessage(
+      writable_block.buf, capacity, std::move(write_lease), channel_id_, this));
+}
+
+template <typename M>
+bool ShmTransmitter<M>::TransmitLoanedMessage(
+    std::unique_ptr<LoanedMessage> message, const MessageInfo& msg_info) {
+  if(!std::is_same<M, LoanedMessage>::value || message == nullptr ||
+     !this->enabled_ || segment_ == nullptr || notifier_ == nullptr ||
+     message->channel_id() != channel_id_ || !message->BeginPublish(this)) {
+    return false;
+  }
+
+  const WritableBlock& writable_block = message->writable_block();
+  if(writable_block.block == nullptr || writable_block.buf == nullptr ||
+     message->size() > message->capacity() ||
+     message->size() > segment_->payload_capacity()) {
+    return false;
+  }
+
+  writable_block.block->set_msg_size(message->size());
+  char* msg_info_addr = reinterpret_cast<char*>(writable_block.buf) +
+                        message->size();
+  std::memcpy(msg_info_addr, msg_info.sender_id().data(), ID_SIZE);
+  std::memcpy(msg_info_addr + ID_SIZE, msg_info.spare_id().data(), ID_SIZE);
+  *reinterpret_cast<uint64_t*>(msg_info_addr + ID_SIZE * 2) =
+      msg_info.seq_num();
+  writable_block.block->set_msg_info_size(ID_SIZE * 2 + sizeof(uint64_t));
+
+  const uint32_t block_index = writable_block.index;
+  const uint64_t generation = writable_block.generation;
+  message->ReleaseWritableLease();
+
+  ReadableInfo readable_info(host_id_, block_index, channel_id_, generation);
+  return notifier_->Notify(readable_info);
 }
 
 

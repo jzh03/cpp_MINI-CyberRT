@@ -12,7 +12,8 @@ namespace transport{
 
 class SegmentFactory{
     public:
-        static SegmentPtr CreateSegment(uint64_t channel_id);
+        static SegmentPtr CreateSegment(uint64_t channel_id,
+                                        uint64_t initial_msg_size = 0);
 };
 
 }

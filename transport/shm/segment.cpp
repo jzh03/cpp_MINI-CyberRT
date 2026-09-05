@@ -36,9 +36,9 @@ const SegmentLayoutHeader* GetLayoutHeader(const void* managed_shm,
 
 }  // namespace
 
-Segment::Segment(uint64_t channel_id) 
+Segment::Segment(uint64_t channel_id, uint64_t initial_msg_size)
     : init_(false),
-      conf_(),
+      conf_(initial_msg_size),
       channel_id_(channel_id),
       state_(nullptr),
       blocks_(nullptr),
@@ -46,7 +46,15 @@ Segment::Segment(uint64_t channel_id)
       block_buf_lock_(),
       block_buf_addrs_() {}
 
-bool Segment::AcquireBlockToWrite(std::size_t msg_size, WritableBlock* writable_block){
+bool Segment::AcquireBlockToWrite(std::size_t msg_size,
+                                  WritableBlock* writable_block){
+    return AcquireBlockToWrite(msg_size, ShmMessageType::UNKNOWN,
+                               writable_block);
+}
+
+bool Segment::AcquireBlockToWrite(std::size_t msg_size,
+                                  ShmMessageType message_type,
+                                  WritableBlock* writable_block){
     RETURN_VAL_IF_NULL(writable_block ,false);
     *writable_block = WritableBlock();
     if(msg_size > conf_.max_message_size()){
@@ -57,6 +65,11 @@ bool Segment::AcquireBlockToWrite(std::size_t msg_size, WritableBlock* writable_
     }
     if(!init_ && !OpenOrCreate()){
         AERROR << "create shm failed, can't write now.";
+        return false;
+    }
+
+    if(!state_->TrySetMessageType(message_type)) {
+        AERROR << "shm channel message type mismatch.";
         return false;
     }
 
@@ -85,12 +98,60 @@ bool Segment::AcquireBlockToWrite(std::size_t msg_size, WritableBlock* writable_
         return false;
     }
 
+    // Recreate creates a fresh State, so restore the channel type marker.
+    if(!state_->TrySetMessageType(message_type)) {
+        AERROR << "shm channel message type mismatch.";
+        return false;
+    }
+
     uint32_t index = GetNextWritableBlockIndex();
     if(index == UINT32_MAX){
         AERROR << "all blocks are busy.";
         return false;
     }
     //将writable_block 指向 blocks_[index]
+    writable_block->index = index;
+    writable_block->generation = blocks_[index].generation();
+    writable_block->block = &blocks_[index];
+    writable_block->buf = block_buf_addrs_[index];
+    return true;
+}
+
+bool Segment::AcquireBlockToWriteWithoutRecreate(
+    std::size_t msg_size, ShmMessageType message_type,
+    WritableBlock* writable_block) {
+    RETURN_VAL_IF_NULL(writable_block, false);
+    *writable_block = WritableBlock();
+    if(msg_size > conf_.max_message_size()) {
+        AERROR << "msg_size: " << msg_size
+               << " larger than max shm message size: "
+               << conf_.max_message_size() << ".";
+        return false;
+    }
+    if(!init_ && !OpenOrCreate()) {
+        AERROR << "create shm failed, can't write now.";
+        return false;
+    }
+    if(state_->need_remap()) {
+        AERROR << "loaned shm channel requires remap.";
+        return false;
+    }
+    if(msg_size > conf_.ceiling_msg_size()) {
+        AERROR << "loaned msg_size: " << msg_size
+               << " larger than fixed shm payload capacity: "
+               << conf_.ceiling_msg_size() << ".";
+        return false;
+    }
+    if(!state_->TrySetMessageType(message_type)) {
+        AERROR << "shm channel message type mismatch.";
+        return false;
+    }
+
+    uint32_t index = GetNextWritableBlockIndex();
+    if(index == UINT32_MAX) {
+        AERROR << "all blocks are busy.";
+        return false;
+    }
     writable_block->index = index;
     writable_block->generation = blocks_[index].generation();
     writable_block->block = &blocks_[index];
@@ -119,6 +180,10 @@ bool Segment::AcquireBlockToRead(ReadableBlock* readable_block){
 
     bool result = true;
     if( state_->need_remap() ){
+        if(state_->message_type() == ShmMessageType::LOANED) {
+            AERROR << "loaned shm channel requires remap.";
+            return false;
+        }
         result = Remap();
     }
 

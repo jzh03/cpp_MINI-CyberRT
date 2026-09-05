@@ -7,7 +7,8 @@ namespace hnu{
 namespace cmw{
 namespace transport{
 
-XsiSegment::XsiSegment(uint64_t channel_id) : Segment(channel_id){
+XsiSegment::XsiSegment(uint64_t channel_id, uint64_t initial_msg_size)
+    : Segment(channel_id, initial_msg_size) {
     key_ = static_cast<key_t>(channel_id);
 }
 

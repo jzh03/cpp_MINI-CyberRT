@@ -6,9 +6,11 @@
 #include <cmw/base/atomic_rw_lock.h>
 #include <cmw/base/rw_lock_guard.h>
 #include <cmw/transport/shm/notifier_base.h>
+#include <cmw/transport/message/loaned_message.h>
 #include <cmw/base/macros.h>
 #include <cmw/common/log.h>
 #include <cmw/serialize/serializable.h>
+#include <type_traits>
 namespace hnu    {
 namespace cmw   {
 namespace transport {
@@ -36,6 +38,29 @@ public:
     
 
 private:
+    template <typename MessageT>
+    void AddListenerImpl(const RoleAttributes& self_attr,
+                         const MessageListener<MessageT>& listener,
+                         std::false_type);
+    template <typename MessageT>
+    void AddListenerImpl(const RoleAttributes& self_attr,
+                         const MessageListener<MessageT>& listener,
+                         std::true_type);
+    template <typename MessageT>
+    void AddListenerImpl(const RoleAttributes& self_attr,
+                         const RoleAttributes& opposite_attr,
+                         const MessageListener<MessageT>& listener,
+                         std::false_type);
+    template <typename MessageT>
+    void AddListenerImpl(const RoleAttributes& self_attr,
+                         const RoleAttributes& opposite_attr,
+                         const MessageListener<MessageT>& listener,
+                         std::true_type);
+    void AddLoanedListener(const RoleAttributes& self_attr,
+                           const MessageListener<LoanedMessage>& listener);
+    void AddLoanedListener(const RoleAttributes& self_attr,
+                           const RoleAttributes& opposite_attr,
+                           const MessageListener<LoanedMessage>& listener);
     void AddSegment(const RoleAttributes& self_attr);
     void ReadMessage(uint64_t channel_id, uint32_t block_index,
                      uint64_t generation);
@@ -60,6 +85,14 @@ private:
 template <typename MessageT>
 void ShmDispatcher::AddListener(const RoleAttributes& self_attr,
                                 const MessageListener<MessageT>& listener){
+        AddListenerImpl(self_attr, listener,
+            typename std::is_same<MessageT, LoanedMessage>::type());
+}
+
+template <typename MessageT>
+void ShmDispatcher::AddListenerImpl(const RoleAttributes& self_attr,
+                                    const MessageListener<MessageT>& listener,
+                                    std::false_type) {
         //回调函数包装器
         auto listener_adapter = [listener](const std::shared_ptr<ReadableBlock>& rb,
                                           const MessageInfo& msg_info){
@@ -79,9 +112,25 @@ void ShmDispatcher::AddListener(const RoleAttributes& self_attr,
 }
 
 template <typename MessageT>
+void ShmDispatcher::AddListenerImpl(const RoleAttributes& self_attr,
+                                    const MessageListener<MessageT>& listener,
+                                    std::true_type) {
+        AddLoanedListener(self_attr, listener);
+}
+
+template <typename MessageT>
 void ShmDispatcher::AddListener(const RoleAttributes& self_attr,
                                 const RoleAttributes& opposite_attr,
                                 const MessageListener<MessageT>& listener) {
+  AddListenerImpl(self_attr, opposite_attr, listener,
+                  typename std::is_same<MessageT, LoanedMessage>::type());
+}
+
+template <typename MessageT>
+void ShmDispatcher::AddListenerImpl(const RoleAttributes& self_attr,
+                                    const RoleAttributes& opposite_attr,
+                                    const MessageListener<MessageT>& listener,
+                                    std::false_type) {
   // FIXME: make it more clean
   auto listener_adapter = [listener](const std::shared_ptr<ReadableBlock>& rb,
                                      const MessageInfo& msg_info) {
@@ -98,6 +147,14 @@ void ShmDispatcher::AddListener(const RoleAttributes& self_attr,
   Dispatcher::AddListener<ReadableBlock>(self_attr, opposite_attr,
                                          listener_adapter);
   AddSegment(self_attr);
+}
+
+template <typename MessageT>
+void ShmDispatcher::AddListenerImpl(const RoleAttributes& self_attr,
+                                    const RoleAttributes& opposite_attr,
+                                    const MessageListener<MessageT>& listener,
+                                    std::true_type) {
+  AddLoanedListener(self_attr, opposite_attr, listener);
 }
 
 
