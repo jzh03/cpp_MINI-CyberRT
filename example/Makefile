@@ -70,8 +70,9 @@ TEST_TARGETS := test_writer test_reader test_serialize test_node_manager \
                 test_hybrid_intra test_hybrid_shm_multiprocess \
                 test_rtps_same_host_multiprocess test_hybrid_dynamic_intra \
                 test_hybrid_dynamic_shm_lifecycle \
-                test_rtps_lifecycle_regression
-BENCHMARK_TARGETS := shm_segment_benchmark
+                test_rtps_lifecycle_regression test_loaned_message_hybrid \
+                test_loaned_message_rtps_multiprocess
+BENCHMARK_TARGETS := shm_segment_benchmark shm_zero_copy_benchmark
 CLASS_LOADER_PLUGIN_DIR := $(PROJECT_ROOT)/class_loader/test
 CLASS_LOADER_PLUGINS := $(CLASS_LOADER_PLUGIN_DIR)/libplugin1.so \
                         $(CLASS_LOADER_PLUGIN_DIR)/libplugin2.so
@@ -125,6 +126,9 @@ $(BIN_DIR)/test_%: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/test_%.o Makefile | chec
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS) -lgtest
 
 $(BIN_DIR)/shm_segment_benchmark: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/shm_segment_benchmark.o Makefile | check-fastdds $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
+
+$(BIN_DIR)/shm_zero_copy_benchmark: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/shm_zero_copy_benchmark.o Makefile | check-fastdds $(BIN_DIR)
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
 
 $(CLASS_LOADER_PLUGIN_DIR)/lib%.so: $(CLASS_LOADER_PLUGIN_DIR)/%.cc | $(CMW_INCLUDE_LINK)

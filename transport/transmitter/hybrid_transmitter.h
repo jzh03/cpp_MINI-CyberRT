@@ -22,6 +22,7 @@ class HybridTransmitter : public Transmitter<M> {
  public:
   using MessagePtr = std::shared_ptr<M>;
   using PeerMap = std::unordered_map<std::string, RoleAttributes>;
+  using Transmitter<M>::TransmitLoanedMessage;
 
   HybridTransmitter(const RoleAttributes& attr, const ParticipantPtr& participant)
       : Transmitter<M>(attr), participant_(participant) {}
@@ -117,26 +118,133 @@ class HybridTransmitter : public Transmitter<M> {
 
   std::unique_ptr<LoanedMessage> AcquireLoanedMessage(
       std::size_t capacity) override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if(!HasOnlyShmPeer()) {
-      return nullptr;
-    }
-    return GetTransmitter(OptionalMode::SHM)->AcquireLoanedMessage(capacity);
+    return AcquireLoanedMessageImpl(
+        capacity, typename std::is_same<M, LoanedMessage>::type());
   }
 
   bool TransmitLoanedMessage(std::unique_ptr<LoanedMessage> message,
                              const MessageInfo& msg_info) override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if(!HasOnlyShmPeer()) {
-      return false;
-    }
-    return GetTransmitter(OptionalMode::SHM)->TransmitLoanedMessage(
-        std::move(message), msg_info);
+    return TransmitLoanedMessageImpl(
+        std::move(message), msg_info,
+        typename std::is_same<M, LoanedMessage>::type());
   }
 
  private:
-  bool HasOnlyShmPeer() const {
-    return !shm_peers_.empty() && intra_peers_.empty() && rtps_peers_.empty();
+  struct LoanedRoute {
+    std::shared_ptr<Transmitter<M>> intra;
+    std::shared_ptr<ShmTransmitter<M>> shm;
+    std::shared_ptr<Transmitter<M>> rtps;
+
+    bool empty() const {
+      return intra == nullptr && shm == nullptr && rtps == nullptr;
+    }
+    bool has_non_shm() const { return intra != nullptr || rtps != nullptr; }
+  };
+
+  std::unique_ptr<LoanedMessage> AcquireLoanedMessageImpl(
+      std::size_t capacity, std::false_type) {
+    (void)capacity;
+    return nullptr;
+  }
+
+  std::unique_ptr<LoanedMessage> AcquireLoanedMessageImpl(
+      std::size_t capacity, std::true_type) {
+    const LoanedRoute route = SnapshotLoanedRoute();
+    if(route.empty() || !IsLoanedCapacityValid(capacity)) {
+      return nullptr;
+    }
+    // Only an exclusively SHM topology keeps the writable block lease.
+    if(route.shm != nullptr && !route.has_non_shm()) {
+      return route.shm->AcquireLoanedMessage(capacity);
+    }
+    return LoanedMessage::CreateHeap(this->attr_.channel_id, capacity);
+  }
+
+  bool TransmitLoanedMessageImpl(std::unique_ptr<LoanedMessage> message,
+                                 const MessageInfo& msg_info,
+                                 std::false_type) {
+    (void)message;
+    (void)msg_info;
+    return false;
+  }
+
+  bool TransmitLoanedMessageImpl(std::unique_ptr<LoanedMessage> message,
+                                 const MessageInfo& msg_info,
+                                 std::true_type) {
+    if(message == nullptr) {
+      return false;
+    }
+    const LoanedRoute route = SnapshotLoanedRoute();
+    if(route.empty() || !message->CanPublish()) {
+      return false;
+    }
+    const bool source_is_shm = message->is_shm_backed();
+    if(source_is_shm && route.shm != nullptr &&
+       !route.shm->CanTransmitLoanedMessage(*message)) {
+      return false;
+    }
+
+    if(route.shm != nullptr && !route.has_non_shm() &&
+       source_is_shm) {
+      return route.shm->TransmitLoanedMessage(std::move(message), msg_info);
+    }
+
+    std::shared_ptr<LoanedMessage> heap_message;
+    if(source_is_shm) {
+      // Discovery can add a non-SHM route after a pure-SHM acquire. Copy
+      // before its writable lease is released, then keep every non-SHM user
+      // on this stable process-local snapshot.
+      heap_message = LoanedMessage::MakeHeapSnapshot(*message);
+    } else {
+      if(!message->BeginHeapPublish()) {
+        return false;
+      }
+      heap_message.reset(message.release());
+    }
+    if(heap_message == nullptr) {
+      return false;
+    }
+
+    // Preserve the established Hybrid order. The snapshot is intentionally
+    // taken without retaining mutex_ across dispatcher, SHM, or Fast DDS work.
+    bool success = true;
+    if(route.intra != nullptr) {
+      success = route.intra->Transmit(heap_message, msg_info) && success;
+    }
+    if(route.shm != nullptr) {
+      if(source_is_shm) {
+        success = route.shm->TransmitLoanedMessage(std::move(message), msg_info) &&
+                  success;
+      } else {
+        success = route.shm->TransmitHeapLoanedMessage(heap_message, msg_info) &&
+                  success;
+      }
+    }
+    if(route.rtps != nullptr) {
+      success = route.rtps->Transmit(heap_message, msg_info) && success;
+    }
+    return success;
+  }
+
+  LoanedRoute SnapshotLoanedRoute() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    LoanedRoute route;
+    if(!intra_peers_.empty()) {
+      route.intra = GetTransmitter(OptionalMode::INTRA);
+    }
+    if(!shm_peers_.empty()) {
+      GetTransmitter(OptionalMode::SHM);
+      route.shm = shm_transmitter_;
+    }
+    if(!rtps_peers_.empty()) {
+      route.rtps = GetTransmitter(OptionalMode::RTPS);
+    }
+    return route;
+  }
+
+  bool IsLoanedCapacityValid(std::size_t capacity) const {
+    const uint32_t configured_capacity = this->attr_.qos_profile.msg_size;
+    return configured_capacity == 0 || capacity <= configured_capacity;
   }
 
   static std::string PeerKey(const RoleAttributes& attr) {
@@ -193,13 +301,28 @@ class HybridTransmitter : public Transmitter<M> {
 
   std::shared_ptr<Transmitter<M>> GetTransmitterImpl(OptionalMode mode,
                                                        std::true_type) {
-    if(mode != OptionalMode::SHM) {
-      return nullptr;
+    // LoanedMessage uses the same topology split as ordinary messages; only
+    // its storage and per-transport send path differ.
+    switch(mode) {
+      case OptionalMode::INTRA:
+        if(intra_transmitter_ == nullptr) {
+          intra_transmitter_ = std::make_shared<IntraTransmitter<M>>(this->attr_);
+        }
+        return intra_transmitter_;
+      case OptionalMode::SHM:
+        if(shm_transmitter_ == nullptr) {
+          shm_transmitter_ = std::make_shared<ShmTransmitter<M>>(this->attr_);
+        }
+        return shm_transmitter_;
+      case OptionalMode::RTPS:
+        if(rtps_transmitter_ == nullptr) {
+          rtps_transmitter_ = std::make_shared<RtpsTransmitter<M>>(
+              this->attr_, participant_);
+        }
+        return rtps_transmitter_;
+      default:
+        return nullptr;
     }
-    if(shm_transmitter_ == nullptr) {
-      shm_transmitter_ = std::make_shared<ShmTransmitter<M>>(this->attr_);
-    }
-    return shm_transmitter_;
   }
 
   void DisablePeers(PeerMap& peers,

@@ -80,63 +80,13 @@ class HybridReceiver : public Receiver<M> {
   }
 
   void EnableImpl(const RoleAttributes& opposite_attr, std::true_type) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const bool had_only_shm_peers = HasOnlyShmPeers();
-    OptionalMode mode = config::SelectMode(this->attr_, opposite_attr);
-    PeerMap* peers = Peers(mode);
-    if(peers == nullptr || peers->find(PeerKey(opposite_attr)) != peers->end()) {
-      return;
-    }
-    peers->emplace(PeerKey(opposite_attr), opposite_attr);
-
-    if(HasOnlyShmPeers()) {
-      GetReceiver(OptionalMode::SHM)->Enable(opposite_attr);
-    } else if(had_only_shm_peers) {
-      DisableShmListeners();
-    }
+    // LoanedMessage now supports all existing receiver paths. Its concrete
+    // decoder is selected by each Receiver/Dispatcher, not by Discovery.
+    EnableImpl(opposite_attr, std::false_type());
   }
 
   void DisableImpl(const RoleAttributes& opposite_attr, std::true_type) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const bool had_only_shm_peers = HasOnlyShmPeers();
-    OptionalMode mode = config::SelectMode(this->attr_, opposite_attr);
-    PeerMap* peers = Peers(mode);
-    if(peers == nullptr) {
-      return;
-    }
-    auto peer = peers->find(PeerKey(opposite_attr));
-    if(peer == peers->end()) {
-      return;
-    }
-    if(mode == OptionalMode::SHM && had_only_shm_peers &&
-       shm_receiver_ != nullptr) {
-      shm_receiver_->Disable(peer->second);
-    }
-    peers->erase(peer);
-
-    if(!had_only_shm_peers && HasOnlyShmPeers()) {
-      EnableShmListeners();
-    }
-  }
-
-  bool HasOnlyShmPeers() const {
-    return !shm_peers_.empty() && intra_peers_.empty() && rtps_peers_.empty();
-  }
-
-  void EnableShmListeners() {
-    auto receiver = GetReceiver(OptionalMode::SHM);
-    for(const auto& peer : shm_peers_) {
-      receiver->Enable(peer.second);
-    }
-  }
-
-  void DisableShmListeners() {
-    if(shm_receiver_ == nullptr) {
-      return;
-    }
-    for(const auto& peer : shm_peers_) {
-      shm_receiver_->Disable(peer.second);
-    }
+    DisableImpl(opposite_attr, std::false_type());
   }
 
   static std::string PeerKey(const RoleAttributes& attr) {
@@ -195,14 +145,7 @@ class HybridReceiver : public Receiver<M> {
 
   std::shared_ptr<Receiver<M>> GetReceiverImpl(OptionalMode mode,
                                                  std::true_type) {
-    if(mode != OptionalMode::SHM) {
-      return nullptr;
-    }
-    if(shm_receiver_ == nullptr) {
-      shm_receiver_ = std::make_shared<ShmReceiver<M>>(
-          this->attr_, this->msg_listener_);
-    }
-    return shm_receiver_;
+    return GetReceiverImpl(mode, std::false_type());
   }
 
   void DisablePeers(PeerMap& peers,

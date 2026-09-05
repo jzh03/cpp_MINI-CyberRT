@@ -1,8 +1,12 @@
 #ifndef CMW_TRANSPORT_TRANSMITTER_RTPS_TRANSMITTER_H_
 #define CMW_TRANSPORT_TRANSMITTER_RTPS_TRANSMITTER_H_
 
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
+#include <type_traits>
+#include <cmw/transport/message/loaned_message.h>
 #include <cmw/transport/transmitter/transmitter.h>
 #include <cmw/config/RoleAttributes.h>
 #include <cmw/transport/rtps/participant.h>
@@ -24,6 +28,7 @@ class RtpsTransmitter : public Transmitter<M> {
 
 public:
     using MessagePtr = std::shared_ptr<M>;
+    using Transmitter<M>::TransmitLoanedMessage;
 
     RtpsTransmitter(const RoleAttributes& attr,
                     const ParticipantPtr& participant);
@@ -35,8 +40,20 @@ public:
 
     bool Transmit(const MessagePtr& msg, const MessageInfo& msg_info) override;
 
+    std::unique_ptr<LoanedMessage> AcquireLoanedMessage(
+        std::size_t capacity) override;
+    bool TransmitLoanedMessage(std::unique_ptr<LoanedMessage> message,
+                               const MessageInfo& msg_info) override;
+
 private:
     bool Transmit(const M& msg, const MessageInfo& msg_info);
+    bool TransmitImpl(const MessagePtr& msg, const MessageInfo& msg_info,
+                      std::false_type);
+    bool TransmitImpl(const MessagePtr& msg, const MessageInfo& msg_info,
+                      std::true_type);
+    bool TransmitSerialized(const char* serialized, std::size_t serialized_size,
+                            const MessageInfo& msg_info);
+    bool IsLoanedCapacityValid(std::size_t capacity) const;
 
     ParticipantPtr participant_;
 
@@ -111,7 +128,7 @@ template <typename M>
 void RtpsTransmitter<M>::Disable() {
   if (rtps_writer != nullptr) {
     // Writer 由 RTPSDomain 删除；其关联的 History 仍由调用方负责释放。
-    if (!participant_->is_shutdown()) {
+    if (participant_ != nullptr && !participant_->is_shutdown()) {
       RTPSDomain::removeRTPSWriter(rtps_writer);
     }
     rtps_writer = nullptr;
@@ -127,22 +144,62 @@ void RtpsTransmitter<M>::Disable() {
 template <typename M>
 bool RtpsTransmitter<M>::Transmit(const MessagePtr& msg,
                                   const MessageInfo& msg_info) {
+  if(msg == nullptr) {
+    return false;
+  }
+  return TransmitImpl(msg, msg_info,
+                      typename std::is_same<M, LoanedMessage>::type());
+}
+
+template <typename M>
+bool RtpsTransmitter<M>::TransmitImpl(const MessagePtr& msg,
+                                      const MessageInfo& msg_info,
+                                      std::false_type) {
   return Transmit(*msg, msg_info);
 }
 
-static int a ;
+template <typename M>
+bool RtpsTransmitter<M>::TransmitImpl(const MessagePtr& msg,
+                                      const MessageInfo& msg_info,
+                                      std::true_type) {
+  if(!msg->is_heap_backed()) {
+    return false;
+  }
+  std::string serialized;
+  if(!LoanedMessage::SerializePayload(*msg, &serialized)) {
+    return false;
+  }
+  return TransmitSerialized(serialized.data(), serialized.size(), msg_info);
+}
+
 template <typename M>
 bool RtpsTransmitter<M>::Transmit(const M& msg, const MessageInfo& msg_info) {
+  serialize::DataStream ds;
+  ds << msg;
+  return TransmitSerialized(ds.data(), ds.size(), msg_info);
+}
+
+template <typename M>
+bool RtpsTransmitter<M>::TransmitSerialized(const char* serialized,
+                                             std::size_t serialized_size,
+                                             const MessageInfo& msg_info) {
   if (!this->enabled_) {
     std::cout << "not enable." << std::endl;
     return false;
   }
+  if(serialized == nullptr || serialized_size >
+      std::numeric_limits<uint32_t>::max() || rtps_writer == nullptr ||
+      mp_history == nullptr || participant_ == nullptr) {
+    return false;
+  }
 
-  //发送数据
-  CacheChange_t* ch = rtps_writer->new_change([]() -> uint32_t
-                        {
-                          return 255;
-                        }, ALIVE);
+  CacheChange_t* ch = rtps_writer->new_change(
+      [serialized_size]() -> uint32_t {
+        return static_cast<uint32_t>(serialized_size);
+      }, ALIVE);
+  if(ch == nullptr || ch->serializedPayload.data == nullptr) {
+    return false;
+  }
 
 
   eprosima::fastrtps::rtps::WriteParams wparams;
@@ -154,14 +211,11 @@ bool RtpsTransmitter<M>::Transmit(const M& msg, const MessageInfo& msg_info) {
   wparams.related_sample_identity().sequence_number().high = (int32_t)((msg_info.seq_num() & 0xFFFFFFFF00000000) >> 32);
   wparams.related_sample_identity().sequence_number().low = (int32_t)(msg_info.seq_num() & 0xFFFFFFFF);
 
-  //序列化成字符串
-  serialize::DataStream ds; 
-  ds << msg;
-  
-  //数据装载 
-  ch->serializedPayload.length = ds.size();
+  ch->serializedPayload.length = static_cast<uint32_t>(serialized_size);
 
-  std::memcpy((char*)ch->serializedPayload.data , ds.data(), ds.size());
+  if(serialized_size != 0) {
+    std::memcpy(ch->serializedPayload.data, serialized, serialized_size);
+  }
   //发送数据
 
   bool flag = mp_history->add_change(ch,wparams);
@@ -179,6 +233,33 @@ bool RtpsTransmitter<M>::Transmit(const M& msg, const MessageInfo& msg_info) {
 
   return true;
 
+}
+
+template <typename M>
+std::unique_ptr<LoanedMessage> RtpsTransmitter<M>::AcquireLoanedMessage(
+    std::size_t capacity) {
+  if(!std::is_same<M, LoanedMessage>::value || !this->enabled_ ||
+     !IsLoanedCapacityValid(capacity)) {
+    return nullptr;
+  }
+  return LoanedMessage::CreateHeap(this->attr_.channel_id, capacity);
+}
+
+template <typename M>
+bool RtpsTransmitter<M>::TransmitLoanedMessage(
+    std::unique_ptr<LoanedMessage> message, const MessageInfo& msg_info) {
+  if(!std::is_same<M, LoanedMessage>::value || message == nullptr ||
+     !message->BeginHeapPublish()) {
+    return false;
+  }
+  std::shared_ptr<LoanedMessage> shared_message(message.release());
+  return Transmit(shared_message, msg_info);
+}
+
+template <typename M>
+bool RtpsTransmitter<M>::IsLoanedCapacityValid(std::size_t capacity) const {
+  const uint32_t configured_capacity = this->attr_.qos_profile.msg_size;
+  return configured_capacity == 0 || capacity <= configured_capacity;
 }
 
 

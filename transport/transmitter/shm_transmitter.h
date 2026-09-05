@@ -40,6 +40,10 @@ public:
         std::size_t capacity) override;
     bool TransmitLoanedMessage(std::unique_ptr<LoanedMessage> message,
                                const MessageInfo& msg_info) override;
+    bool TransmitHeapLoanedMessage(
+        const std::shared_ptr<LoanedMessage>& message,
+        const MessageInfo& msg_info);
+    bool CanTransmitLoanedMessage(const LoanedMessage& message) const;
 
 private:
     bool Transmit(const M& msg, const MessageInfo& msg_info);
@@ -240,6 +244,54 @@ bool ShmTransmitter<M>::TransmitLoanedMessage(
   const uint64_t generation = writable_block.generation;
   message->ReleaseWritableLease();
 
+  ReadableInfo readable_info(host_id_, block_index, channel_id_, generation);
+  return notifier_->Notify(readable_info);
+}
+
+template <typename M>
+bool ShmTransmitter<M>::CanTransmitLoanedMessage(
+    const LoanedMessage& message) const {
+  return std::is_same<M, LoanedMessage>::value && this->enabled_ &&
+      segment_ != nullptr && notifier_ != nullptr && message.is_shm_backed() &&
+      message.CanPublish() && message.channel_id() == channel_id_ &&
+      message.owner_ == this && message.write_lease_ &&
+      message.size() <= segment_->payload_capacity();
+}
+
+template <typename M>
+bool ShmTransmitter<M>::TransmitHeapLoanedMessage(
+    const std::shared_ptr<LoanedMessage>& message,
+    const MessageInfo& msg_info) {
+  if(!std::is_same<M, LoanedMessage>::value || message == nullptr ||
+     !message->is_heap_backed() || !message->is_read_only() ||
+     !this->enabled_ || segment_ == nullptr || notifier_ == nullptr ||
+     message->channel_id() != channel_id_ ||
+     message->size() > message->capacity() ||
+     message->size() > segment_->payload_capacity()) {
+    return false;
+  }
+
+  WritableBlock writable_block;
+  if(!segment_->AcquireBlockToWriteWithoutRecreate(
+         message->size(), ShmMessageType::LOANED, &writable_block)) {
+    return false;
+  }
+  WritableBlockLease write_lease(segment_, writable_block);
+  if(message->size() != 0) {
+    std::memcpy(writable_block.buf, message->data(), message->size());
+  }
+  writable_block.block->set_msg_size(message->size());
+  char* msg_info_addr = reinterpret_cast<char*>(writable_block.buf) +
+                        message->size();
+  std::memcpy(msg_info_addr, msg_info.sender_id().data(), ID_SIZE);
+  std::memcpy(msg_info_addr + ID_SIZE, msg_info.spare_id().data(), ID_SIZE);
+  *reinterpret_cast<uint64_t*>(msg_info_addr + ID_SIZE * 2) =
+      msg_info.seq_num();
+  writable_block.block->set_msg_info_size(ID_SIZE * 2 + sizeof(uint64_t));
+
+  const uint32_t block_index = writable_block.index;
+  const uint64_t generation = writable_block.generation;
+  write_lease.Release();
   ReadableInfo readable_info(host_id_, block_index, channel_id_, generation);
   return notifier_->Notify(readable_info);
 }

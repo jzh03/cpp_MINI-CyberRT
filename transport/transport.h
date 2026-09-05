@@ -163,8 +163,15 @@ Transport::CreateTransmitter<LoanedMessage>(const RoleAttributes& attr,
 
     std::shared_ptr<Transmitter<LoanedMessage>> transmitter = nullptr;
     switch(mode) {
+        case OptionalMode::INTRA:
+            transmitter = std::make_shared<IntraTransmitter<LoanedMessage>>(attr);
+            break;
         case OptionalMode::SHM:
             transmitter = std::make_shared<ShmTransmitter<LoanedMessage>>(attr);
+            break;
+        case OptionalMode::RTPS:
+            transmitter = std::make_shared<RtpsTransmitter<LoanedMessage>>(
+                attr, participant());
             break;
         case OptionalMode::HYBRID:
             transmitter = std::make_shared<HybridTransmitter<LoanedMessage>>(
@@ -175,7 +182,7 @@ Transport::CreateTransmitter<LoanedMessage>(const RoleAttributes& attr,
     }
 
     RETURN_VAL_IF_NULL(transmitter, nullptr);
-    if(mode == OptionalMode::SHM) {
+    if(mode != OptionalMode::HYBRID) {
         transmitter->Enable();
     }
     AINFO << "Create LoanedMessage Transmitter Sucess";
@@ -196,8 +203,16 @@ Transport::CreateReceiver<LoanedMessage>(
 
     std::shared_ptr<Receiver<LoanedMessage>> receiver = nullptr;
     switch(mode) {
+        case OptionalMode::INTRA:
+            receiver = std::make_shared<IntraReceiver<LoanedMessage>>(
+                attr, msg_listener);
+            break;
         case OptionalMode::SHM:
             receiver = std::make_shared<ShmReceiver<LoanedMessage>>(
+                attr, msg_listener);
+            break;
+        case OptionalMode::RTPS:
+            receiver = std::make_shared<RtpsReceiver<LoanedMessage>>(
                 attr, msg_listener);
             break;
         case OptionalMode::HYBRID:
@@ -209,7 +224,7 @@ Transport::CreateReceiver<LoanedMessage>(
     }
 
     RETURN_VAL_IF_NULL(receiver, nullptr);
-    if(mode == OptionalMode::SHM) {
+    if(mode != OptionalMode::HYBRID) {
         receiver->Enable();
     }
     return receiver;
