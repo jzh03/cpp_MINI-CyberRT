@@ -39,9 +39,22 @@ class LoanedMessage {
     PUBLISHED,
   };
 
+  // Blocker keeps a dummy message for Subscriber<LoanedMessage>; it never
+  // participates in a transport path.
+  LoanedMessage()
+      : data_(nullptr),
+        size_(0),
+        capacity_(0),
+        channel_id_(0),
+        block_index_(0),
+        generation_(0),
+        owner_(nullptr),
+        storage_mode_(StorageMode::HEAP_BACKED),
+        state_(State::READ_ONLY) {}
+
   LoanedMessage(uint8_t* data, std::size_t capacity,
                 WritableBlockLease&& write_lease, uint64_t channel_id,
-                const void* owner)
+                const void* owner, uint64_t enable_epoch = 0)
       : data_(data),
         size_(0),
         capacity_(capacity),
@@ -49,6 +62,7 @@ class LoanedMessage {
         block_index_(write_lease.block().index),
         generation_(write_lease.block().generation),
         owner_(owner),
+        enable_epoch_(enable_epoch),
         storage_mode_(StorageMode::SHM_BACKED),
         state_(State::WRITABLE),
         write_lease_(std::move(write_lease)) {}
@@ -235,6 +249,7 @@ class LoanedMessage {
   uint32_t block_index_;
   uint64_t generation_;
   const void* owner_;
+  uint64_t enable_epoch_ = 0;
   StorageMode storage_mode_;
   State state_;
   bool size_set_ = false;

@@ -19,6 +19,7 @@ MINI_CyberRT 是针对原始 cmw 项目进行的二次开发，在保留原有 C
 - Segment Recreate 后再次校验实际 Block capacity，并保留原有的正常自动扩容。
 - 所有 Block 被占用时最多扫描一轮后返回失败，避免无限 busy-spin；读 Block 失败时立即丢弃本次消息，不再访问无效内存。
 - 默认 Segment 后端为 POSIX SHM（`shm_open` + `mmap`）；`OpenOnly()` 会为当前进程重新建立 Block buffer 地址表。XSI/System V 后端仍保留，可显式用于回归和性能对比。
+- SHM 消息元信息中的序号统一通过 `memcpy` 编解码，Payload 长度未对齐时仍保持原有字段偏移、布局和字节序。
 
 ### LoanedMessage 零拷贝
 
@@ -26,6 +27,8 @@ MINI_CyberRT 是针对原始 cmw 项目进行的二次开发，在保留原有 C
 - 仅 SHM 路径返回 SHM-backed Loan，直接提交原 Block；不经过 `DataStream`、Payload 序列化或中间 `memcpy`。
 - 只要活跃路径包含 INTRA 或 RTPS，Loan 使用 Heap-backed 存储：INTRA 共享同一 `shared_ptr`，SHM 复制一次到 Block，RTPS 仅发送 `uint32_t` 长度和 Payload bytes。
 - 接收端 Loan 始终只读；SHM 接收端持有读 Lease，Heap 存储在最后一个 `shared_ptr` 释放时回收。
+- SHM Transmitter 的 Enable、Disable、Acquire 与发送路径使用同一生命周期锁；关闭会等待已进入发送临界区的操作完成，关闭后新的 Acquire/发送安全失败。
+- SHM-backed Loan 记录发送端的启用周期；Disable 后或 Disable→Enable 后提交旧 Loan 会被拒绝，重新获取的 Loan 可正常发送。Heap-backed Loan 不受旧 SHM 周期限制。
 
 ### API 正确性
 
@@ -84,6 +87,8 @@ Hybrid Transport 使用轻量 peer 表维护状态：
 - `test_rtps_same_host_multiprocess`：在同一主机的两个进程中显式强制 RTPS，验证 RTPS 数据路径未发生回归。
 - `test_hybrid_dynamic_intra`：验证同进程 Subscriber 离开后，新 Subscriber 可以重新 JOIN 并通过 INTRA 接收消息。
 - `test_hybrid_dynamic_shm_lifecycle`：验证同机跨进程 Subscriber A LEAVE 后，Subscriber B 可以重新 JOIN 并通过 SHM 通信。
+- `test_shm_transmitter_lifecycle_regression`：覆盖未对齐序号元信息的普通消息、SHM-backed Loan 和 Heap-backed Loan 路径，以及发送与 Enable/Disable 并发、旧 SHM Loan 拒绝和恢复收发。
+- `test_loaned_message_dynamic_shm_lifecycle`：通过两个真实进程持续发布 LoanedMessage，验证 Subscriber 正常 LEAVE 后重新 JOIN 的 Discovery 驱动 SHM 恢复。
 - `test_rtps_lifecycle_regression`：同机显式强制 RTPS，多轮验证 Enable、通信、Disable 和重新 Enable 的资源生命周期。
 - `test_posix_segment_multiprocess`：验证 POSIX Segment 双进程 `OpenOnly()`、多 Block 读写、重新打开和资源清理。
 - `shm_segment_benchmark`：以相同的跨进程 Block 读写路径比较 POSIX 与 XSI 的稳态延迟和吞吐。运行：`cd example && make shm_segment_benchmark && ./build/bin/shm_segment_benchmark`。

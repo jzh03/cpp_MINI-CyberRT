@@ -123,7 +123,9 @@ void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index,
     spare_id.set_data(msg_info_addr + ID_SIZE);
     msg_info.set_spare_id(spare_id);
     //拷贝 seq
-    msg_info.set_seq_num(*(reinterpret_cast<uint64_t*>(const_cast<char*>(msg_info_addr+2*ID_SIZE))));
+    uint64_t seq_num = 0;
+    std::memcpy(&seq_num, msg_info_addr + 2 * ID_SIZE, sizeof(seq_num));
+    msg_info.set_seq_num(seq_num);
 
     if(segment->message_type() == ShmMessageType::LOANED) {
         ListenerHandlerBasePtr* handler_base = nullptr;
