@@ -20,6 +20,13 @@ MINI_CyberRT 是针对原始 cmw 项目进行的二次开发，在保留原有 C
 - 所有 Block 被占用时最多扫描一轮后返回失败，避免无限 busy-spin；读 Block 失败时立即丢弃本次消息，不再访问无效内存。
 - 默认 Segment 后端为 POSIX SHM（`shm_open` + `mmap`）；`OpenOnly()` 会为当前进程重新建立 Block buffer 地址表。XSI/System V 后端仍保留，可显式用于回归和性能对比。
 
+### LoanedMessage 零拷贝
+
+- `Publisher<LoanedMessage>::AcquireMessage(capacity)` 提供连续 Payload；写入后调用 `set_size()`，再通过 `Publish(std::move(message))` 发送。
+- 仅 SHM 路径返回 SHM-backed Loan，直接提交原 Block；不经过 `DataStream`、Payload 序列化或中间 `memcpy`。
+- 只要活跃路径包含 INTRA 或 RTPS，Loan 使用 Heap-backed 存储：INTRA 共享同一 `shared_ptr`，SHM 复制一次到 Block，RTPS 仅发送 `uint32_t` 长度和 Payload bytes。
+- 接收端 Loan 始终只读；SHM 接收端持有读 Lease，Heap 存储在最后一个 `shared_ptr` 释放时回收。
+
 ### API 正确性
 
 - `Publisher::Publish()` 现在会正确返回底层 `Transmit()` 结果，避免非 `void` 函数无返回值的未定义行为。
