@@ -202,6 +202,10 @@ TEST(LoanedMessageDynamicShmLifecycleTest,
   discovery::TopologyManager::Instance();
   ASSERT_TRUE(ReadByteWithTimeout(status_pipe[0], 'R', 5000));
 
+  // Both processes have constructed their Discovery endpoints at this point,
+  // but Fast DDS matches those endpoints asynchronously.  Do not publish the
+  // publisher's one-shot JOIN before the match can receive it.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   ASSERT_TRUE(WriteByte(control_pipe[1], 'J'));
   ASSERT_TRUE(ReadByteWithTimeout(status_pipe[0], 'J', 5000));
   ASSERT_TRUE(ReceiveAndLeave(channel, '1', control_pipe[1], status_pipe[0]));

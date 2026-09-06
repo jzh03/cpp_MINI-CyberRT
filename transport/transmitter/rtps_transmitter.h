@@ -53,6 +53,16 @@ private:
                       std::true_type);
     bool TransmitSerialized(const char* serialized, std::size_t serialized_size,
                             const MessageInfo& msg_info);
+    std::unique_ptr<LoanedMessage> AcquireLoanedMessageImpl(
+        std::size_t capacity, std::false_type);
+    std::unique_ptr<LoanedMessage> AcquireLoanedMessageImpl(
+        std::size_t capacity, std::true_type);
+    bool TransmitLoanedMessageImpl(std::unique_ptr<LoanedMessage> message,
+                                   const MessageInfo& msg_info,
+                                   std::false_type);
+    bool TransmitLoanedMessageImpl(std::unique_ptr<LoanedMessage> message,
+                                   const MessageInfo& msg_info,
+                                   std::true_type);
     bool IsLoanedCapacityValid(std::size_t capacity) const;
 
     ParticipantPtr participant_;
@@ -238,18 +248,45 @@ bool RtpsTransmitter<M>::TransmitSerialized(const char* serialized,
 template <typename M>
 std::unique_ptr<LoanedMessage> RtpsTransmitter<M>::AcquireLoanedMessage(
     std::size_t capacity) {
-  if(!std::is_same<M, LoanedMessage>::value || !this->enabled_ ||
-     !IsLoanedCapacityValid(capacity)) {
+  return AcquireLoanedMessageImpl(
+      capacity, typename std::is_same<M, LoanedMessage>::type());
+}
+
+template <typename M>
+bool RtpsTransmitter<M>::TransmitLoanedMessage(
+    std::unique_ptr<LoanedMessage> message, const MessageInfo& msg_info) {
+  return TransmitLoanedMessageImpl(
+      std::move(message), msg_info,
+      typename std::is_same<M, LoanedMessage>::type());
+}
+
+template <typename M>
+std::unique_ptr<LoanedMessage> RtpsTransmitter<M>::AcquireLoanedMessageImpl(
+    std::size_t /*capacity*/, std::false_type) {
+  return nullptr;
+}
+
+template <typename M>
+std::unique_ptr<LoanedMessage> RtpsTransmitter<M>::AcquireLoanedMessageImpl(
+    std::size_t capacity, std::true_type) {
+  if (!this->enabled_ || !IsLoanedCapacityValid(capacity)) {
     return nullptr;
   }
   return LoanedMessage::CreateHeap(this->attr_.channel_id, capacity);
 }
 
 template <typename M>
-bool RtpsTransmitter<M>::TransmitLoanedMessage(
-    std::unique_ptr<LoanedMessage> message, const MessageInfo& msg_info) {
-  if(!std::is_same<M, LoanedMessage>::value || message == nullptr ||
-     !message->BeginHeapPublish()) {
+bool RtpsTransmitter<M>::TransmitLoanedMessageImpl(
+    std::unique_ptr<LoanedMessage> /*message*/, const MessageInfo& /*msg_info*/,
+    std::false_type) {
+  return false;
+}
+
+template <typename M>
+bool RtpsTransmitter<M>::TransmitLoanedMessageImpl(
+    std::unique_ptr<LoanedMessage> message, const MessageInfo& msg_info,
+    std::true_type) {
+  if (message == nullptr || !message->BeginHeapPublish()) {
     return false;
   }
   std::shared_ptr<LoanedMessage> shared_message(message.release());

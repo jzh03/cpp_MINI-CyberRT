@@ -82,10 +82,9 @@ Hybrid Transport 使用轻量 peer 表维护状态：
 
 - 新增序列化边界、SHM 消息大小/Recreate、全 Block 占用、读失败以及 SHM Transmitter/Receiver 恢复能力的测试。
 - `test_transport_mode_selection`：纯元数据测试，验证 same-process、same-host different-process、different-host 三种模式判断。
-- `test_hybrid_intra`：通过真实 Publisher、Subscriber 和 Discovery 验证同进程 INTRA 通信、连续消息、Shutdown 以及多个同模式 peer 的 LEAVE 行为。
+- `test_hybrid_intra`：通过真实 Publisher、Subscriber 和 Discovery 验证同进程 INTRA 通信、连续消息、Shutdown、多个同模式 peer 的 LEAVE，以及旧 Subscriber 离开后新 Subscriber 重新 JOIN 的行为。
 - `test_hybrid_shm_multiprocess`：通过两个真实进程验证 Subscriber-first 启动以及同主机不同 PID 自动选择 SHM。
 - `test_rtps_same_host_multiprocess`：在同一主机的两个进程中显式强制 RTPS，验证 RTPS 数据路径未发生回归。
-- `test_hybrid_dynamic_intra`：验证同进程 Subscriber 离开后，新 Subscriber 可以重新 JOIN 并通过 INTRA 接收消息。
 - `test_hybrid_dynamic_shm_lifecycle`：验证同机跨进程 Subscriber A LEAVE 后，Subscriber B 可以重新 JOIN 并通过 SHM 通信。
 - `test_shm_transmitter_lifecycle_regression`：覆盖未对齐序号元信息的普通消息、SHM-backed Loan 和 Heap-backed Loan 路径，以及发送与 Enable/Disable 并发、旧 SHM Loan 拒绝和恢复收发。
 - `test_loaned_message_dynamic_shm_lifecycle`：通过两个真实进程持续发布 LoanedMessage，验证 Subscriber 正常 LEAVE 后重新 JOIN 的 Discovery 驱动 SHM 恢复。

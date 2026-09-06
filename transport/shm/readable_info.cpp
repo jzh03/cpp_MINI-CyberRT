@@ -23,8 +23,6 @@ ReadableInfo::ReadableInfo(uint64_t host_id, uint32_t block_index,
       generation_(generation) {}
     
 
-ReadableInfo::~ReadableInfo() {}
-
 ReadableInfo& ReadableInfo::operator=(const ReadableInfo& other){
     if(this != &other){
         this->host_id_ = other.host_id_;

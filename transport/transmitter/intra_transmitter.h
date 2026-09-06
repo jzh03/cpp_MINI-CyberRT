@@ -37,24 +37,48 @@ class IntraTransmitter : public Transmitter<M> {
 
   std::unique_ptr<LoanedMessage> AcquireLoanedMessage(
       std::size_t capacity) override {
-    if(!std::is_same<M, LoanedMessage>::value || !this->enabled_ ||
-       !IsLoanedCapacityValid(capacity)) {
+    return AcquireLoanedMessageImpl(
+        capacity, typename std::is_same<M, LoanedMessage>::type());
+  }
+
+  bool TransmitLoanedMessage(std::unique_ptr<LoanedMessage> message,
+                             const MessageInfo& msg_info) override {
+    return TransmitLoanedMessageImpl(
+        std::move(message), msg_info,
+        typename std::is_same<M, LoanedMessage>::type());
+  }
+
+ private:
+  std::unique_ptr<LoanedMessage> AcquireLoanedMessageImpl(
+      std::size_t /*capacity*/, std::false_type) {
+    return nullptr;
+  }
+
+  std::unique_ptr<LoanedMessage> AcquireLoanedMessageImpl(
+      std::size_t capacity, std::true_type) {
+    if (!this->enabled_ || !IsLoanedCapacityValid(capacity)) {
       return nullptr;
     }
     return LoanedMessage::CreateHeap(this->attr_.channel_id, capacity);
   }
 
-  bool TransmitLoanedMessage(std::unique_ptr<LoanedMessage> message,
-                             const MessageInfo& msg_info) override {
-    if(!std::is_same<M, LoanedMessage>::value || !this->enabled_ ||
-       message == nullptr || !message->BeginHeapPublish()) {
+  bool TransmitLoanedMessageImpl(std::unique_ptr<LoanedMessage> /*message*/,
+                                 const MessageInfo& /*msg_info*/,
+                                 std::false_type) {
+    return false;
+  }
+
+  bool TransmitLoanedMessageImpl(std::unique_ptr<LoanedMessage> message,
+                                 const MessageInfo& msg_info,
+                                 std::true_type) {
+    if (!this->enabled_ || message == nullptr ||
+        !message->BeginHeapPublish()) {
       return false;
     }
     std::shared_ptr<LoanedMessage> shared_message(message.release());
     return Transmit(shared_message, msg_info);
   }
 
- private:
   bool IsLoanedCapacityValid(std::size_t capacity) const {
     const uint32_t configured_capacity = this->attr_.qos_profile.msg_size;
     return configured_capacity == 0 || capacity <= configured_capacity;

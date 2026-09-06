@@ -26,6 +26,7 @@
 
 namespace hnu {
 namespace cmw {
+
 namespace {
 
 // 验证同主机不同 PID 经 Discovery 自动选择 SHM 的真实双进程链路。

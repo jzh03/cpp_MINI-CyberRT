@@ -23,6 +23,7 @@
 
 namespace hnu {
 namespace cmw {
+
 namespace {
 
 // 同机显式强制 RTPS 的生命周期回归消息，不代表跨主机自动路由。

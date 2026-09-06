@@ -15,7 +15,7 @@ public:
     ReadableInfo(uint64_t host_id , uint32_t block_index , uint64_t channel_id);
     ReadableInfo(uint64_t host_id , uint32_t block_index , uint64_t channel_id,
                  uint64_t generation);
-    virtual ~ReadableInfo();
+    ~ReadableInfo() = default;
 
     ReadableInfo& operator=(const ReadableInfo& other);
 
@@ -37,6 +37,10 @@ public:
 
     static const size_t ksize;
 private:
+    // Indicator stores this type in System V shared memory.  Keep an explicit
+    // leading word so its layout remains compatible with the former vptr slot,
+    // without storing a process-local vtable address in shared memory.
+    uintptr_t reserved_ = 0;
     uint64_t host_id_;
     uint32_t block_index_;
     uint64_t channel_id_;

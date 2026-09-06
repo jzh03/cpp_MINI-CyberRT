@@ -26,6 +26,7 @@
 
 namespace hnu {
 namespace cmw {
+
 namespace {
 
 struct HybridDynamicShmMessage : public serialize::Serializable {

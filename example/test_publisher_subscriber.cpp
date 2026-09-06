@@ -13,6 +13,7 @@
 #include <cmw/node/subscriber.h>
 #include <cmw/node/publisher.h>
 #include <cmw/config/unit_test.h>
+#include <cmw/scheduler/scheduler_factory.h>
 #include <cmw/serialize/data_stream.h>
 #include <cmw/serialize/serializable.h>
 
@@ -28,7 +29,7 @@ struct SerializationRegressionMessage : public Serializable
     SERIALIZE(sequence, text, values)
 };
 
-void WriterReaderTest_constructor(){
+TEST(PublisherSubscriberTest, ConstructorPreservesChannelAndInitialState) {
     const std::string channel_name("constructor");
     RoleAttributes attr;
     attr.channel_name = channel_name;
@@ -60,7 +61,7 @@ void WriterReaderTest_constructor(){
     EXPECT_EQ(subscriber_c.GetChannelName(), channel_name);  
 }
 
-void WriterReaderTest_init_and_shutdown(){
+TEST(PublisherSubscriberTest, InitIsIdempotentAndDuplicateSubscriberIsRejected) {
     const std::string channel_name_a("init");
     const std::string channel_name_b("shutdown");  
 
@@ -116,8 +117,7 @@ void WriterReaderTest_init_and_shutdown(){
     EXPECT_FALSE(subscriber_c.IsInit());
 }
 
-bool WriterReaderTest_serialization_round_trip()
-{
+TEST(PublisherSubscriberTest, SerializationRoundTripDeliversAllFields) {
     // 使用进程号隔离通道，避免与其他并行测试重名。
     auto global_data = common::GlobalData::Instance();
     const std::string channel_name =
@@ -156,12 +156,12 @@ bool WriterReaderTest_serialization_round_trip()
 
     if (!subscriber.Init())
     {
-        return false;
+        FAIL() << "subscriber initialization failed";
     }
     if (!publisher.Init())
     {
         subscriber.Shutdown();
-        return false;
+        FAIL() << "publisher initialization failed";
     }
 
     SerializationRegressionMessage expected{};
@@ -169,41 +169,37 @@ bool WriterReaderTest_serialization_round_trip()
     expected.text = "publisher subscriber";
     expected.values = {-3, 0, 7, 99};
 
-    // RTPS 匹配是异步的，在限定时间内重复发布直到订阅端收到消息。
+    // Transport matching is asynchronous. Publish until the callback reports
+    // completion, but keep every assertion on this test thread.
     std::unique_lock<std::mutex> lock(mutex);
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
     while (!received && std::chrono::steady_clock::now() < deadline)
     {
         lock.unlock();
-        publisher.Publish(expected);
+        EXPECT_TRUE(publisher.Publish(expected));
         lock.lock();
         condition.wait_for(lock, std::chrono::milliseconds(250),
                            [&]() { return received; });
     }
-    bool message_received = received;
-    SerializationRegressionMessage received_message{};
-    if (received)
-    {
-        received_message = actual;
-    }
+    const bool message_received = received;
+    const SerializationRegressionMessage received_message = actual;
     lock.unlock();
 
     publisher.Shutdown();
     subscriber.Shutdown();
 
-    return message_received &&
-           received_message.sequence == expected.sequence &&
-           received_message.text == expected.text &&
-           received_message.values == expected.values;
+    ASSERT_TRUE(message_received)
+        << "timed out waiting for publisher/subscriber delivery";
+    EXPECT_EQ(expected.sequence, received_message.sequence);
+    EXPECT_EQ(expected.text, received_message.text);
+    EXPECT_EQ(expected.values, received_message.values);
 }
 
-int main()
+int main(int argc, char** argv)
 {
     hnu::cmw::Init("Test_publisher_subscriber");
-    WriterReaderTest_constructor();
-    WriterReaderTest_init_and_shutdown();
-    bool passed = WriterReaderTest_serialization_round_trip();
-    std::cout << "Publisher/Subscriber serialization round-trip: "
-              << (passed ? "PASS" : "FAIL") << std::endl;
-    return passed ? 0 : 1;
+    testing::InitGoogleTest(&argc, argv);
+    const int result = RUN_ALL_TESTS();
+    scheduler::Instance()->Shutdown();
+    return result;
 }
