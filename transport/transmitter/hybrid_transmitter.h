@@ -86,24 +86,18 @@ class HybridTransmitter : public Transmitter<M> {
 
   bool TransmitImpl(const MessagePtr& msg, const MessageInfo& msg_info,
                     std::false_type) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (intra_peers_.empty() && shm_peers_.empty() && rtps_peers_.empty()) {
-      return true;
-    }
-
-    // 一次 Publish 向每种活跃模式各发送一次，不按 peer 数量重复发送。
+    const LoanedRoute route = SnapshotLoanedRoute();
+    // Keep the no-peer ordinary Publish success contract. Do not hold the
+    // route lock across synchronous callbacks or backend resource use.
     bool success = true;
-    if (!intra_peers_.empty()) {
-      success = GetTransmitter(OptionalMode::INTRA)->Transmit(msg, msg_info) &&
-                success;
+    if (route.intra != nullptr) {
+      success = route.intra->Transmit(msg, msg_info) && success;
     }
-    if (!shm_peers_.empty()) {
-      success = GetTransmitter(OptionalMode::SHM)->Transmit(msg, msg_info) &&
-                success;
+    if (route.shm != nullptr) {
+      success = route.shm->Transmit(msg, msg_info) && success;
     }
-    if (!rtps_peers_.empty()) {
-      success = GetTransmitter(OptionalMode::RTPS)->Transmit(msg, msg_info) &&
-                success;
+    if (route.rtps != nullptr) {
+      success = route.rtps->Transmit(msg, msg_info) && success;
     }
     return success;
   }

@@ -93,3 +93,112 @@ POSIX `fstat().st_size` 或 XSI `shmctl(IPC_STAT).shm_segsz`，从实际段末�
 ## 更早的环境记录（日期未记录）
 
 此前 TSan 曾被 VM 的 `unexpected memory mapping` 阻止，不能视为通过。
+
+## 2026-09-10 发送端生命周期同步
+
+起始分支 `dev`，HEAD `47e28ed19afccb4923fe6dc179a0214e8ddd7acf`；工作区干净，
+未找到适用的 AGENTS.md。原有布局 v2 已在该 HEAD 中，本轮未改共享区布局。
+没有 commit、push、reset 或合并。
+
+新增测试先以 `/tmp/cyberrt-lifecycle-normal` 构建，首轮 INTRA、强制 RTPS、
+真实 Discovery churn 三个程序全部通过，随后增加普通/Loan 重入和受控 Hybrid
+RTPS 快照交错用例。第一次 RTPS 校验误把 Payload 全程序号与 DDS Writer 序号
+等同，按本地 ReaListener 的实际行为修正测试：Payload 序号跨启停唯一且校验
+全部数据，DDS 序号有效且允许 Writer 重建后重新计数；没有改接收协议。
+
+验证期间保留的失败与修正：
+
+- 第一次完整普通 check 遗漏 `CMW_PATH`，若干依赖配置的程序失败；设置正确
+  环境后 fast 14、integration 11 个程序全通过。该轮尚未包含后述依赖修正。
+- 多配置同时高并行编译导致 UBSan 的 cc1plus 被系统杀死；降低并行度后重建。
+- UBSan 完整回归揭示 Publish 必经的 `PerfEventCache` 对齐错误：
+  `reference binding to misaligned address ... requires 64 byte alignment`。
+  `BoundedQueue` 含 alignas(64) 成员，C++14 默认 new 未满足该要求。
+  在所有构建加入 `-faligned-new`，不关闭 alignment/vptr 检查；对象规则现在
+  依赖 Makefile，选项变更后重新编译。
+- 新 Discovery 测试初次 ASan 在进程静态析构阶段发现调度线程仍读取已释放的
+  静态哈希表，随后退出超时；在测试退出前显式调用 Scheduler/SHM Dispatcher
+  Shutdown 并等待线程，保留全局关闭实现。重新运行发现 2592 字节/27 次分配
+  的泄漏：9 个离开的本地 Subscriber 各遗留一条 heap Loan。调用链是
+  Subscriber → CreateRoutineFactory → 回调返回 → Yield，CRoutine 删除时
+  直接回收挂起栈，不展开局部 shared_ptr 的析构。单消息工厂在回调后 Yield 前
+  reset 自己的引用；用户保留的消息引用不变，也避免遗留 SHM Lease。
+- 早期 ASan 与其他配置测试同时运行时，现有 SHM 并发用例的最终通知被判为
+  stale generation，旧 RTPS 生命周期用例一次等待收包失败。SHM 用例补上
+  初始消息确认，确保延迟打开的接收映射已经绑定再开始启停，并增加内容与
+  重复检查。后续各配置测试顺序执行，不并发运行共享通知区测试。
+- TSan 三个程序均在进入测试前退出 66：
+  `FATAL: ThreadSanitizer: unexpected memory mapping`，其中首个地址为
+  `0x79f9c5eae000-0x79f9c6300000`。没有修改 ASLR 或继续改造环境。
+  **TSan 未通过、未能执行测试**；这是最终依赖修正前的启动尝试，不声称最终
+  代码获得了 TSan 验证。
+
+失败诊断日志保留在本机 `/tmp/cyberrt-lifecycle-normal-check.log`、
+`/tmp/cyberrt-lifecycle-ubsan-build.log`、`/tmp/cyberrt-lifecycle-ubsan-check.log`、
+`/tmp/cyberrt-lifecycle-asan-test.log`、
+`/tmp/cyberrt-lifecycle-asan-discovery-final.log`、
+`/tmp/cyberrt-lifecycle-tsan-test.log`。这些临时文件不是测试输入。
+
+最终必要修正后的执行（仓库根目录，GCC 11.4.0，Linux 6.8.0-138-generic，
+本地 Fast DDS 源码标签 v2.12.0）：
+
+```sh
+make -C example -j1 BUILD_DIR=/tmp/cyberrt-lifecycle-normal tests
+make -C example -j2 BUILD_DIR=/tmp/cyberrt-lifecycle-ubsan SANITIZE=undefined tests
+asan_tests='test_intra_transmitter_lifecycle test_rtps_transmitter_lifecycle test_loaned_message_discovery_churn test_shm_transmitter_lifecycle_regression test_loaned_message_hybrid test_shm_block_lease_generation test_rtps_lifecycle_regression test_loaned_message_rtps_multiprocess'
+make -C example -j1 BUILD_DIR=/tmp/cyberrt-lifecycle-asan SANITIZE=address $asan_tests
+CMW_PATH="$PWD" ASAN_OPTIONS=halt_on_error=1 bash example/run_tests.sh \
+  --bin-dir /tmp/cyberrt-lifecycle-asan/bin --timeout 90 $asan_tests
+```
+
+ASan 这轮七个程序通过，只有旧 `test_rtps_lifecycle_regression` 收包等待失败，
+没有 sanitizer 内存错误。该测试固定等待 500ms 不能证明 DDS 已匹配；改为
+通过管道确认真实 readiness probe 已收到，然后仍然只发送一次待验证消息，
+保留单次接收与重复检测，并新增错误 Payload 检查。针对改动单独复验：
+
+```sh
+make -C example -j2 BUILD_DIR=/tmp/cyberrt-lifecycle-asan SANITIZE=address test_rtps_lifecycle_regression
+CMW_PATH="$PWD" ASAN_OPTIONS=halt_on_error=1 bash example/run_tests.sh \
+  --bin-dir /tmp/cyberrt-lifecycle-asan/bin --timeout 90 test_rtps_lifecycle_regression
+```
+
+该程序通过。因此最终 ASan 八个程序均有通过结果（七个原组通过、一个修正后
+单独通过），无剩余 ASan/LeakSanitizer 报错；没有禁用泄漏检查。日志分别为
+`/tmp/cyberrt-lifecycle-asan-verified.log`（原组含一个已修正的失败）和
+`/tmp/cyberrt-lifecycle-asan-rtps-final.log`。后者约 1.16 秒。
+
+TSan 实际尝试命令（最终依赖修正前）：
+
+```sh
+make -C example -j2 BUILD_DIR=/tmp/cyberrt-lifecycle-tsan SANITIZE=thread \
+  test_intra_transmitter_lifecycle test_rtps_transmitter_lifecycle test_shm_transmitter_lifecycle_regression
+CMW_PATH="$PWD" TSAN_OPTIONS=halt_on_error=1 bash example/run_tests.sh \
+  --bin-dir /tmp/cyberrt-lifecycle-tsan/bin --timeout 30 \
+  test_intra_transmitter_lifecycle test_rtps_transmitter_lifecycle test_shm_transmitter_lifecycle_regression
+```
+
+最终完整回归按配置顺序执行，避免共享通知区测试互相干扰：
+
+```sh
+CMW_PATH="$PWD" make -C example -j2 BUILD_DIR=/tmp/cyberrt-lifecycle-normal check
+CMW_PATH="$PWD" UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  make -C example -j2 BUILD_DIR=/tmp/cyberrt-lifecycle-ubsan SANITIZE=undefined check
+```
+
+两组均退出 0：普通 fast 14 / integration 11 个程序全部通过；UBSan fast 14 /
+integration 11 个程序全部通过，无 runtime error、失败或超时。覆盖新增 INTRA/
+RTPS/Discovery 三个入口，以及 Hybrid INTRA/SHM、普通 RTPS 生命周期、Loan、
+SHM generation/Lease、布局 v2 的相关现有回归。最终日志：
+`/tmp/cyberrt-lifecycle-normal-verified.log`、
+`/tmp/cyberrt-lifecycle-ubsan-verified.log`。
+
+Fast DDS 库沿用本地安装，未使用 sanitizer 重编译。RTPS 数据路径包含同机强制
+后端及既有跨进程往返；构造不同 host 元数据的 Hybrid 只计受控路由测试。
+真实 Discovery churn 的远端 Subscriber 实例在同一子进程内反复创建/正常离开；
+不是多台主机，也不是每轮重启 VM/网络。测试只覆盖本轮单发布线程与拓扑/后端
+启停的同步约定；多线程 Publish、并发 Publisher/Participant/Transport Shutdown
+不在承诺范围内，TSan 未能启动。
+
+最终 `git diff --check` 通过；新增未跟踪测试文件也单独检查空白错误。改动保留
+在 dev 工作区供审阅，未提交或推送。运行时核心变更见 TESTING.md 的同步约定，
+其余主要为三个新测试入口、共享测试辅助头、现有 SHM/RTPS 编排补强与验证说明。

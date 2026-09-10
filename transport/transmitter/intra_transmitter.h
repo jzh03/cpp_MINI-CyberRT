@@ -1,6 +1,7 @@
 #ifndef CMW_TRANSPORT_TRANSMITTER_INTRA_TRANSMITTER_H_
 #define CMW_TRANSPORT_TRANSMITTER_INTRA_TRANSMITTER_H_
 
+#include <mutex>
 #include <type_traits>
 
 #include <cmw/transport/dispatcher/intra_dispatcher.h>
@@ -22,14 +23,26 @@ class IntraTransmitter : public Transmitter<M> {
       : Transmitter<M>(attr), dispatcher_(IntraDispatcher::Instance()) {}
   virtual ~IntraTransmitter() { Disable(); }
 
-  void Enable() override { this->enabled_ = true; }
+  void Enable() override {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    this->enabled_ = true;
+  }
 
-  void Disable() override { this->enabled_ = false; }
+  void Disable() override {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    this->enabled_ = false;
+  }
 
   bool Transmit(const MessagePtr& msg, const MessageInfo& msg_info) override {
-    if (!this->enabled_) {
-      return false;
+    {
+      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+      if (!this->enabled_ || msg == nullptr) {
+        return false;
+      }
     }
+    // Admission precedes Disable, or fails after it. Dispatch owns no
+    // per-enable resources: admitted callbacks may finish after Disable.
+    // Never wait for callbacks here; they may reenter Publish/Disable.
     // 保留原消息对象和 MessageInfo，不进入 SHM 或 FastDDS 数据路径。
     dispatcher_->Dispatch(this->attr_.channel_id, msg, msg_info);
     return true;
@@ -56,6 +69,7 @@ class IntraTransmitter : public Transmitter<M> {
 
   std::unique_ptr<LoanedMessage> AcquireLoanedMessageImpl(
       std::size_t capacity, std::true_type) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     if (!this->enabled_ || !IsLoanedCapacityValid(capacity)) {
       return nullptr;
     }
@@ -71,7 +85,7 @@ class IntraTransmitter : public Transmitter<M> {
   bool TransmitLoanedMessageImpl(std::unique_ptr<LoanedMessage> message,
                                  const MessageInfo& msg_info,
                                  std::true_type) {
-    if (!this->enabled_ || message == nullptr ||
+    if (message == nullptr ||
         !message->BeginHeapPublish()) {
       return false;
     }
@@ -85,6 +99,7 @@ class IntraTransmitter : public Transmitter<M> {
   }
 
   IntraDispatcherPtr dispatcher_;
+  std::mutex lifecycle_mutex_;
 };
 
 }

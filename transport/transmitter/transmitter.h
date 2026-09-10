@@ -56,6 +56,8 @@ public:
     uint64_t seq_num() const { return seq_num_; }
 
 protected:
+    // One publishing thread (including synchronous reentry) per transmitter.
+    // Topology operations do not access seq_num_ or msg_info_.
     //帧号
     uint64_t seq_num_;
     //帧附加数据
@@ -79,11 +81,12 @@ Transmitter<M>::~Transmitter() {}
 template <typename M>
 bool Transmitter<M>::Transmit(const MessagePtr& msg){
 
-    msg_info_.set_seq_num(NextSeqNum());
+    MessageInfo msg_info = msg_info_;
+    msg_info.set_seq_num(NextSeqNum());
 
-    PerfEventCache::Instance()->AddTransportEvent(TransPerf::TRANSMIT_BEGIN, attr_.channel_id ,msg_info_.seq_num());
+    PerfEventCache::Instance()->AddTransportEvent(TransPerf::TRANSMIT_BEGIN, attr_.channel_id ,msg_info.seq_num());
     
-    return Transmit(msg, msg_info_);
+    return Transmit(msg, msg_info);
 
 }
 
@@ -94,10 +97,11 @@ bool Transmitter<M>::TransmitLoanedMessage(
         return false;
     }
 
-    msg_info_.set_seq_num(NextSeqNum());
+    MessageInfo msg_info = msg_info_;
+    msg_info.set_seq_num(NextSeqNum());
     PerfEventCache::Instance()->AddTransportEvent(
-        TransPerf::TRANSMIT_BEGIN, attr_.channel_id, msg_info_.seq_num());
-    return TransmitLoanedMessage(std::move(message), msg_info_);
+        TransPerf::TRANSMIT_BEGIN, attr_.channel_id, msg_info.seq_num());
+    return TransmitLoanedMessage(std::move(message), msg_info);
 }
 
 template <typename M>

@@ -15,7 +15,9 @@ CMW_INCLUDE_LINK  := $(COMPAT_INC_DIR)/cmw
 CPPFLAGS := -I$(COMPAT_INC_DIR) \
             -I$(PROJECT_ROOT)/thirdparty \
             -I$(FAST_DDS_INC_DIR)
-CXXFLAGS := -std=c++14 -g -MMD -MP
+# C++14 otherwise uses unaligned new for cache-line-aligned runtime objects
+# (e.g. PerfEventCache's BoundedQueue). Keep the language version unchanged.
+CXXFLAGS := -std=c++14 -faligned-new -g -MMD -MP
 LDFLAGS  := -L$(FAST_DDS_LIB_DIR) -Wl,-rpath,$(FAST_DDS_LIB_DIR)
 LDLIBS   := -Wl,--no-as-needed \
             -lfastrtps -lfastcdr -lfoonathan_memory-0.7.3 \
@@ -25,6 +27,15 @@ LDLIBS   := -Wl,--no-as-needed \
 ifeq ($(SANITIZE),undefined)
 CXXFLAGS += -fsanitize=undefined,vptr -fno-sanitize-recover=all -fPIE
 LDFLAGS += -fsanitize=undefined,vptr -fno-sanitize-recover=all -pie
+endif
+
+ifeq ($(SANITIZE),address)
+CXXFLAGS += -fsanitize=address -fno-omit-frame-pointer -fno-pie
+LDFLAGS += -fsanitize=address -no-pie
+endif
+ifeq ($(SANITIZE),thread)
+CXXFLAGS += -fsanitize=thread -fno-omit-frame-pointer -fno-pie
+LDFLAGS += -fsanitize=thread -no-pie
 endif
 
 # Keep discovery inside explicit runtime directories. Tests, examples,
@@ -77,7 +88,8 @@ FAST_TEST_TARGETS := test_serialize test_blocker test_node \
                      test_shm_segment_robustness test_shm_block_lease_generation \
                      test_shm_dispatcher_robustness test_shm_transmitter_receiver \
                      test_shm_loaned_message test_shm_transmitter_lifecycle_regression \
-                     test_loaned_message_hybrid test_hybrid_intra
+                     test_loaned_message_hybrid test_hybrid_intra \
+                     test_intra_transmitter_lifecycle
 INTEGRATION_TEST_TARGETS := test_shm_segment_exec test_posix_segment_multiprocess \
                             test_loaned_message_dynamic_shm_lifecycle \
                             test_shm_loaned_message_multiprocess \
@@ -85,7 +97,9 @@ INTEGRATION_TEST_TARGETS := test_shm_segment_exec test_posix_segment_multiproces
                             test_rtps_same_host_multiprocess \
                             test_hybrid_dynamic_shm_lifecycle \
                             test_rtps_lifecycle_regression \
-                            test_loaned_message_rtps_multiprocess
+                            test_loaned_message_rtps_multiprocess \
+                            test_rtps_transmitter_lifecycle \
+                            test_loaned_message_discovery_churn
 FORMAL_TEST_TARGETS := $(FAST_TEST_TARGETS) $(INTEGRATION_TEST_TARGETS)
 
 # Hand-operated programs and diagnostics remain buildable, but are never run
@@ -195,7 +209,7 @@ $(BIN_DIR)/shm_zero_copy_benchmark: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/shm_zer
 $(CLASS_LOADER_PLUGIN_DIR)/lib%.so: $(CLASS_LOADER_PLUGIN_DIR)/%.cc | $(CMW_INCLUDE_LINK)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared -fPIC -o $@ $^ -lpthread -ldl
 
-$(OBJ_DIR)/%.o: $(PROJECT_ROOT)/%.cpp | $(CMW_INCLUDE_LINK)
+$(OBJ_DIR)/%.o: $(PROJECT_ROOT)/%.cpp Makefile | $(CMW_INCLUDE_LINK)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
 

@@ -234,6 +234,16 @@ TEST(ShmTransmitterLifecycleRegression, SendAndEnableDisableDoNotRace) {
       [&](const std::shared_ptr<LoanedMessage>& message, const MessageInfo& info,
           const RoleAttributes&) {
         std::lock_guard<std::mutex> lock(received_mutex);
+        EXPECT_EQ(1U, message->size());
+        if(message->size() == 1) {
+          const uint8_t expected = info.seq_num() == 1000 ? 'w' :
+              (info.seq_num() == 999 ? 'z' : static_cast<uint8_t>(info.seq_num()));
+          EXPECT_EQ(expected, message->data()[0]);
+        }
+        EXPECT_TRUE(std::none_of(received.begin(), received.end(),
+            [&](const std::pair<std::string, uint64_t>& item) {
+              return item.second == info.seq_num();
+            }));
         received.emplace_back(
             std::string(reinterpret_cast<const char*>(message->data()),
                         message->size()),
@@ -244,6 +254,15 @@ TEST(ShmTransmitterLifecycleRegression, SendAndEnableDisableDoNotRace) {
   ShmTransmitter<LoanedMessage> transmitter(
       MakeRoleAttributes(channel, "_transmitter"));
   transmitter.Enable();
+
+  // ShmDispatcher opens its segment lazily on the first notification. Bind
+  // and acknowledge that segment before churning the transmitter's owners.
+  auto warmup = transmitter.AcquireLoanedMessage(1);
+  ASSERT_TRUE(Fill(warmup, "w"));
+  MessageInfo warmup_info;
+  warmup_info.set_seq_num(1000);
+  ASSERT_TRUE(transmitter.TransmitLoanedMessage(std::move(warmup), warmup_info));
+  ASSERT_TRUE(WaitForCount(&received_mutex, &received_condition, &received, 1));
 
   std::mutex start_mutex;
   std::condition_variable start_condition;

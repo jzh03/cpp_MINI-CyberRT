@@ -4,6 +4,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <type_traits>
 #include <cmw/transport/message/loaned_message.h>
@@ -65,6 +66,9 @@ private:
                                    std::true_type);
     bool IsLoanedCapacityValid(std::size_t capacity) const;
 
+    // Serializes enable/disable and the complete Writer/History use.
+    // User-held heap loans do not retain this lock or any DDS resource.
+    std::mutex lifecycle_mutex_;
     ParticipantPtr participant_;
 
 
@@ -88,6 +92,7 @@ RtpsTransmitter<M>::~RtpsTransmitter() {
 
 template <typename M>
 void RtpsTransmitter<M>::Enable(){
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
 
     if(this->enabled_){
         return;
@@ -136,6 +141,7 @@ void RtpsTransmitter<M>::Enable(){
 
 template <typename M>
 void RtpsTransmitter<M>::Disable() {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
   if (rtps_writer != nullptr) {
     // Writer 由 RTPSDomain 删除；其关联的 History 仍由调用方负责释放。
     if (participant_ != nullptr && !participant_->is_shutdown()) {
@@ -193,8 +199,9 @@ template <typename M>
 bool RtpsTransmitter<M>::TransmitSerialized(const char* serialized,
                                              std::size_t serialized_size,
                                              const MessageInfo& msg_info) {
-  if (!this->enabled_) {
-    std::cout << "not enable." << std::endl;
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+  if (!this->enabled_ || participant_ == nullptr ||
+      participant_->is_shutdown()) {
     return false;
   }
   if(serialized == nullptr || serialized_size >
@@ -207,7 +214,11 @@ bool RtpsTransmitter<M>::TransmitSerialized(const char* serialized,
       [serialized_size]() -> uint32_t {
         return static_cast<uint32_t>(serialized_size);
       }, ALIVE);
-  if(ch == nullptr || ch->serializedPayload.data == nullptr) {
+  if(ch == nullptr) {
+    return false;
+  }
+  if(ch->serializedPayload.data == nullptr) {
+    rtps_writer->release_change(ch);
     return false;
   }
 
@@ -234,14 +245,13 @@ bool RtpsTransmitter<M>::TransmitSerialized(const char* serialized,
   if(!flag)
   {
     rtps_writer->remove_older_changes(20);
-    mp_history->add_change(ch,wparams);
+    flag = mp_history->add_change(ch,wparams);
   }
-  if(participant_->is_shutdown())
-  {
-    return false;
+  if(!flag) {
+    // History only owns the change after a successful add.
+    rtps_writer->release_change(ch);
   }
-
-  return true;
+  return flag;
 
 }
 
@@ -269,6 +279,7 @@ std::unique_ptr<LoanedMessage> RtpsTransmitter<M>::AcquireLoanedMessageImpl(
 template <typename M>
 std::unique_ptr<LoanedMessage> RtpsTransmitter<M>::AcquireLoanedMessageImpl(
     std::size_t capacity, std::true_type) {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
   if (!this->enabled_ || !IsLoanedCapacityValid(capacity)) {
     return nullptr;
   }

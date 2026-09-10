@@ -44,7 +44,10 @@ RoutineFactory CreateRoutineFactory(
             for(;;){
                 CRoutine::GetCurrentRoutine()->set_state(RoutineState::DATA_WAIT);
                 if(dv->TryFetch(msg)){
-                    f(msg);  
+                    f(msg);
+                    // A stopped coroutine's stack is recycled without unwinding.
+                    // Do not retain the last message (or its SHM lease) on it.
+                    msg.reset();
                     CRoutine::Yield(RoutineState::READY);
                 }else{
                     CRoutine::Yield();
