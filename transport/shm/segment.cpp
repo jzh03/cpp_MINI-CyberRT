@@ -13,11 +13,13 @@ struct SegmentLayoutHeader {
     uint32_t version;
     uint32_t state_size;
     uint32_t block_size;
-    uint32_t reserved;
+    uint16_t state_align;
+    uint16_t block_align;
+    uint64_t ceiling_msg_size;
 };
 
 const uint64_t kSegmentLayoutMagic = 0x434d5753484d3541ULL;
-const uint32_t kSegmentLayoutVersion = 1;
+const uint32_t kSegmentLayoutVersion = 2;
 
 SegmentLayoutHeader* GetLayoutHeader(void* managed_shm, const ShmConf& conf)
 {
@@ -26,13 +28,8 @@ SegmentLayoutHeader* GetLayoutHeader(void* managed_shm, const ShmConf& conf)
         sizeof(SegmentLayoutHeader));
 }
 
-const SegmentLayoutHeader* GetLayoutHeader(const void* managed_shm,
-                                           const ShmConf& conf)
-{
-    return reinterpret_cast<const SegmentLayoutHeader*>(
-        static_cast<const char*>(managed_shm) + conf.managed_shm_size() -
-        sizeof(SegmentLayoutHeader));
-}
+static_assert(sizeof(State) % alignof(Block) == 0,
+              "Block array must be aligned after State.");
 
 }  // namespace
 
@@ -282,26 +279,52 @@ bool Segment::InitializeLayout()
     }
 
     SegmentLayoutHeader* header = GetLayoutHeader(managed_shm_, conf_);
+    new (header) SegmentLayoutHeader();
     header->magic = kSegmentLayoutMagic;
     header->version = kSegmentLayoutVersion;
     header->state_size = sizeof(State);
     header->block_size = sizeof(Block);
-    header->reserved = 0;
+    header->state_align = alignof(State);
+    header->block_align = alignof(Block);
+    header->ceiling_msg_size = conf_.ceiling_msg_size();
     return true;
 }
 
-bool Segment::HasValidLayout() const
+bool Segment::HasValidLayout(std::size_t mapped_size)
 {
-    if(managed_shm_ == nullptr ||
-       conf_.managed_shm_size() < sizeof(SegmentLayoutHeader)){
+    if(managed_shm_ == nullptr || mapped_size < sizeof(SegmentLayoutHeader)){
         return false;
     }
 
-    const SegmentLayoutHeader* header = GetLayoutHeader(managed_shm_, conf_);
-    return header->magic == kSegmentLayoutMagic &&
-           header->version == kSegmentLayoutVersion &&
-           header->state_size == sizeof(State) &&
-           header->block_size == sizeof(Block);
+    // Locate the trailer using the OS-reported size, never unvalidated State.
+    // Copy only plain metadata: a truncated segment may have an unaligned end.
+    SegmentLayoutHeader header;
+    std::memcpy(&header, static_cast<const char*>(managed_shm_) + mapped_size -
+                sizeof(header), sizeof(header));
+    if(header.magic != kSegmentLayoutMagic ||
+       header.version != kSegmentLayoutVersion ||
+       header.state_size != sizeof(State) ||
+       header.block_size != sizeof(Block) ||
+       header.state_align != alignof(State) ||
+       header.block_align != alignof(Block)){
+        return false;
+    }
+    ShmConf checked_conf(header.ceiling_msg_size);
+    if(header.ceiling_msg_size != checked_conf.ceiling_msg_size() ||
+       mapped_size != checked_conf.managed_shm_size() ||
+       sizeof(State) + checked_conf.block_num() *
+           (sizeof(Block) + checked_conf.block_buf_size()) >
+           mapped_size - sizeof(header)){
+        return false;
+    }
+
+    // The complete mapping and ABI are now checked before any atomic access.
+    State* checked_state = reinterpret_cast<State*>(managed_shm_);
+    if(checked_state->ceiling_msg_size() != header.ceiling_msg_size){
+        return false;
+    }
+    conf_.Update(header.ceiling_msg_size);
+    return true;
 }
 
 WritableBlockLease::WritableBlockLease(const SegmentPtr& segment,

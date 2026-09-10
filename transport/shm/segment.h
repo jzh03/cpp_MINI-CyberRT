@@ -68,7 +68,7 @@ protected:
     virtual bool OpenOnly() = 0;
     virtual bool OpenOrCreate() = 0;
     bool InitializeLayout();
-    bool HasValidLayout() const;
+    bool HasValidLayout(std::size_t mapped_size);
     bool init_;
     ShmConf conf_;
     uint64_t channel_id_;

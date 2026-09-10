@@ -21,6 +21,12 @@ LDLIBS   := -Wl,--no-as-needed \
             -lfastrtps -lfastcdr -lfoonathan_memory-0.7.3 \
             -Wl,--as-needed -lpthread -luuid -lrt -latomic -ldl
 
+# Use a separate BUILD_DIR for sanitizer objects and binaries.
+ifeq ($(SANITIZE),undefined)
+CXXFLAGS += -fsanitize=undefined,vptr -fno-sanitize-recover=all -fPIE
+LDFLAGS += -fsanitize=undefined,vptr -fno-sanitize-recover=all -pie
+endif
+
 # Keep discovery inside explicit runtime directories. Tests, examples,
 # thirdparty sources, class-loader plugins and components are excluded.
 COMMON_SOURCE_DIRS     := common config discovery event log node serialize \
@@ -72,7 +78,7 @@ FAST_TEST_TARGETS := test_serialize test_blocker test_node \
                      test_shm_dispatcher_robustness test_shm_transmitter_receiver \
                      test_shm_loaned_message test_shm_transmitter_lifecycle_regression \
                      test_loaned_message_hybrid test_hybrid_intra
-INTEGRATION_TEST_TARGETS := test_posix_segment_multiprocess \
+INTEGRATION_TEST_TARGETS := test_shm_segment_exec test_posix_segment_multiprocess \
                             test_loaned_message_dynamic_shm_lifecycle \
                             test_shm_loaned_message_multiprocess \
                             test_hybrid_shm_multiprocess \

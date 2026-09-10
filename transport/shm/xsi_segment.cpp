@@ -36,6 +36,7 @@ bool XsiSegment::OpenOrCreate() {
     managed_shm_ = shmat(shmid, nullptr , 0);
     if(managed_shm_ == reinterpret_cast<void*>(-1)){
         AERROR << "attach shm failed, error: " << strerror(errno);
+        managed_shm_ = nullptr;
         shmctl(shmid , IPC_RMID , 0); //删除共享内存
         return false;
     }
@@ -127,6 +128,7 @@ bool XsiSegment::OpenOnly(){
     managed_shm_ = shmat(shmid, nullptr, 0);
     if (managed_shm_ == reinterpret_cast<void*>(-1)) {
         AERROR << "attach shm failed, error: " << strerror(errno);
+        managed_shm_ = nullptr;
         return false;
     }
 
@@ -139,29 +141,13 @@ bool XsiSegment::OpenOnly(){
     }
 
       // get field state_
-    state_ = reinterpret_cast<State*>(managed_shm_);
-    if (state_ == nullptr) {
-        AERROR << "get state failed.";
-        shmdt(managed_shm_);
-        managed_shm_ = nullptr;
-        return false;
-    }
-
-    conf_.Update(state_->ceiling_msg_size());
-
-    if(shm_info.shm_segsz < conf_.managed_shm_size()){
-        AERROR << "shm size is too small.";
-        Reset();
-        return false;
-    }
-
-    if(!HasValidLayout()){
+    if(!HasValidLayout(shm_info.shm_segsz)){
         AERROR << "incompatible shm layout.";
         Reset();
         return false;
     }
+    state_ = reinterpret_cast<State*>(managed_shm_);
 
-      // get field blocks_
     blocks_ = reinterpret_cast<Block*>(static_cast<char*>(managed_shm_) +
                                      sizeof(State));
 
@@ -187,17 +173,7 @@ bool XsiSegment::OpenOnly(){
     }
 
     if (i != conf_.block_num()) {
-        AERROR << "open only failed.";
-        state_->~State();
-        state_ = nullptr;
-        blocks_ = nullptr;
-        {
-        std::lock_guard<std::mutex> _g(block_buf_lock_);
-        block_buf_addrs_.clear();
-        }
-        shmdt(managed_shm_);
-        managed_shm_ = nullptr;
-        shmctl(shmid, IPC_RMID, 0);
+        Reset();
         return false;
     }
 

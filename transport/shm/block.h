@@ -2,6 +2,7 @@
 #define CMW_TRANSPORT_SHM_BLOCK_H_
 
 
+#include <type_traits>
 #include <atomic>
 #include <cstdint>
 
@@ -15,7 +16,7 @@ class Block
     friend class Segment;
 public:
     Block();
-    virtual ~Block();
+    ~Block();
 
     uint64_t msg_size() const { return msg_size_; }
     void set_msg_size(uint64_t msg_size) { msg_size_ = msg_size;}
@@ -43,6 +44,9 @@ private:
     uint64_t msg_size_;
     uint64_t msg_info_size_;
 };
+
+static_assert(!std::is_polymorphic<Block>::value,
+              "Shared memory objects must not contain a vptr.");
 
 
 

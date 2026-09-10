@@ -187,27 +187,12 @@ bool PosixSegment::OpenOnly(){
     close(fd);
     mapped_size_ = static_cast<std::size_t>(file_attr.st_size);
     //直接转换
-    state_ = reinterpret_cast<State*>(managed_shm_);         
-    if (state_ == nullptr) {
-        std::cout << "get state failed." << std::endl;
-        munmap(managed_shm_, mapped_size_);
-        managed_shm_ = nullptr;
-        mapped_size_ = 0;
-        return false;
-    }
-
-    conf_.Update(state_->ceiling_msg_size());
-    if(mapped_size_ < conf_.managed_shm_size()){
-        std::cout << "shm size is too small." << std::endl;
-        Reset();
-        return false;
-    }
-
-    if(!HasValidLayout()){
+    if(!HasValidLayout(mapped_size_)){
         std::cout << "incompatible shm layout." << std::endl;
         Reset();
         return false;
     }
+    state_ = reinterpret_cast<State*>(managed_shm_);
 
     blocks_ = reinterpret_cast<Block*>(static_cast<char*>(managed_shm_) + sizeof(State));
 

@@ -2,6 +2,7 @@
 #define CMW_TRANSPORT_SHM_READABLE_INFO_H_
 
 
+#include <type_traits>
 #include <stdint.h>
 #include <string>
 namespace hnu{
@@ -47,6 +48,9 @@ private:
     uint64_t generation_;
     
 };
+
+static_assert(!std::is_polymorphic<ReadableInfo>::value,
+              "Shared memory objects must not contain a vptr.");
 
 
 

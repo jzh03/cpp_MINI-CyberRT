@@ -1,5 +1,7 @@
 # 测试入口
 
+本文介绍测试范围和运行方法；执行结果与环境问题见 [测试日志](testlog.md)。
+
 在 `example/` 目录运行。构建需要本地 Fast DDS；运行中间件测试时通常还需要
 `CMW_PATH` 指向仓库根目录：
 
@@ -24,7 +26,7 @@ CMW_PATH="$(cd .. && pwd)" ./build/bin/test_blocker
 - `test_hybrid_intra`（同进程 INTRA，包括离开后新订阅者加入）
 
 `make check-integration` 构建并顺序运行需要 fork、Discovery 收敛或强制 RTPS 的
-回归：`test_posix_segment_multiprocess`、`test_loaned_message_dynamic_shm_lifecycle`、
+回归：`test_shm_segment_exec`、`test_posix_segment_multiprocess`、`test_loaned_message_dynamic_shm_lifecycle`、
 `test_shm_loaned_message_multiprocess`、`test_hybrid_shm_multiprocess`、
 `test_rtps_same_host_multiprocess`、`test_hybrid_dynamic_shm_lifecycle`、
 `test_rtps_lifecycle_regression`、`test_loaned_message_rtps_multiprocess`。
@@ -46,5 +48,46 @@ topology manager、log、getenv；不会启动它们。`make benchmarks` 仅构�
 
 同机强制 RTPS 只验证强制 RTPS 数据路径，不代表跨主机自动选路。普通并发回归
 只能覆盖所编排的交错，不证明没有所有竞态；Notifier 完整性测试也不证明全面的
-内存序正确性。此前 TSan 曾被 VM 的 unexpected memory mapping 阻止，不能视为
-通过；UBSan 和 TSan 是同一测试的不同构建方式，不需要复制测试源文件。
+内存序正确性。UBSan 和 TSan 是同一测试的不同构建方式，不需要复制测试源文件。
+
+## 共享区无 vptr 回归
+
+`test_shm_segment_exec` 已纳入 `check-integration`。父进程通过真实 Segment
+创建消息，子进程 `fork + exec /proc/self/exe --reader ...` 后打开、读取、释放
+Block 并写回消息；父进程用带 10 秒截止时间的 `waitpid` 回收子进程，再次 exec
+验证重开。POSIX 和 XSI 共用测试逻辑，仅清理本测试独占创建的资源。
+布局拒绝覆盖带真实虚析构的旧 State 和旧版尾标记、新版错误版本、缺失标记、
+1/31 字节截断、非对齐的错误总长、错误类型大小/对齐、非法容量，以及
+State 容量与尾标记不一致。失败前后比较完整映射字节，检查未修改引用计数等内容。
+
+在仓库根目录执行共享内存相关的普通回归（使用全新目录，避免旧 ABI 对象残留）：
+
+```sh
+make -C example -j4 BUILD_DIR=/tmp/cmw-vptr-normal \
+  test_shm_segment_exec test_shm_segment_robustness \
+  test_shm_block_lease_generation test_shm_loaned_message \
+  test_posix_segment_multiprocess
+CMW_PATH="$PWD" bash example/run_tests.sh \
+  --bin-dir /tmp/cmw-vptr-normal/bin --timeout 30 \
+  test_shm_segment_exec test_shm_segment_robustness \
+  test_shm_block_lease_generation test_shm_loaned_message \
+  test_posix_segment_multiprocess
+```
+
+UBSan 必须使用独立 BUILD_DIR；此开关同时为全部 C++ 源文件和链接添加
+`-fsanitize=undefined,vptr -fno-sanitize-recover=all`，并分别使用 `-fPIE`、`-pie`。
+不要关闭 ASLR：
+
+```sh
+make -C example -j4 BUILD_DIR=/tmp/cmw-vptr-ubsan SANITIZE=undefined \
+  test_shm_segment_exec
+CMW_PATH="$PWD" UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  bash example/run_tests.sh --bin-dir /tmp/cmw-vptr-ubsan/bin \
+  --timeout 30 test_shm_segment_exec
+```
+
+旧布局不支持混用或在线迁移。升级前请人工确认并停止相关旧进程，确认具体
+channel 对应的 POSIX `/cmw_<channel_id>` 或 XSI key/shmid 后，只清理这些旧段，
+再启动全部使用新版的进程重建。不要全局清理 `/dev/shm` 或批量 `ipcrm`。
+通知区 ReadableInfo 布局此次未变；更早版本遗留的通知区也应在停止旧进程后
+人工确认、重建，不应与旧程序同时使用。

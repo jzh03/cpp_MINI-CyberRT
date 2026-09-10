@@ -33,6 +33,9 @@ class ConditionNotifier : public NotifierBase{
         std::atomic<uint64_t> seqs[kBufLength];
     };
 
+    static_assert(!std::is_polymorphic<Indicator>::value,
+                  "Shared memory Indicator must not contain a vptr.");
+
     public:
         ConditionNotifier(key_t key, bool remove_on_shutdown);
         virtual ~ConditionNotifier();

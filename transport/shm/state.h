@@ -2,6 +2,7 @@
 #define CMW_TRANSPORT_SHM_STATE_H_
 
 
+#include <type_traits>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -22,7 +23,7 @@ class State
 
 public:
     explicit State(const uint64_t& ceiling_msg_size);
-    virtual ~State();
+    ~State();
 
     //为啥不直接 fetch_sub 而要使用 cas 操作，想了一下应该是确保reference_count_的值不能小于0
     void DecreaseReferenceCounts() {
@@ -79,6 +80,9 @@ private:
         static_cast<uint8_t>(ShmMessageType::UNKNOWN)};
 
 };
+
+static_assert(!std::is_polymorphic<State>::value,
+              "Shared memory objects must not contain a vptr.");
 
 
 
