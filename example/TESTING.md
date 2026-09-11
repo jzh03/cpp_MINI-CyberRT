@@ -34,13 +34,14 @@ CMW_PATH="$(cd .. && pwd)" ./build/bin/test_blocker
 
 | 程序 | 功能与覆盖范围 |
 | --- | --- |
+| `test_condition_notifier` | 通知槽位互斥、发布序号、丢弃与恢复、绕环、并发字段一致性及 fork+exec 广播/布局拒绝。 |
 | `test_shm_segment_exec` | POSIX/XSI 的 fork+exec 读写、重开及不兼容布局拒绝。 |
 | `test_posix_segment_multiprocess` | POSIX 双进程 OpenOnly、多 Block 读写、重开与资源清理。 |
 | `test_loaned_message_dynamic_shm_lifecycle` | 两个真实进程验证 LoanedMessage 在 Subscriber LEAVE/JOIN 后恢复 SHM 通信。 |
 | `test_shm_loaned_message_multiprocess` | 跨进程 Loan 只读接收、读 Lease 持有及块回收。 |
 | `test_hybrid_shm_multiprocess` | Subscriber-first 启动，真实 Discovery 按同 host、不同 PID 自动选择 SHM。 |
 | `test_rtps_same_host_multiprocess` | 同机两个进程显式强制 RTPS 收发。 |
-| `test_hybrid_dynamic_shm_lifecycle` | 同机跨进程 Subscriber A 离开后 B 加入及 SHM 通信恢复。 |
+| `test_hybrid_dynamic_shm_lifecycle` | 同机跨进程 Subscriber A 离开后 B 加入及 SHM 通信恢复；使用长 message_type 强制 Discovery 通知超过 255 字节。 |
 | `test_rtps_lifecycle_regression` | 显式编排普通消息发送端启停，以真实探测消息确认匹配后单次发送并检查重复。 |
 | `test_loaned_message_rtps_multiprocess` | LoanedMessage RTPS 线格式边界、跨进程 heap-backed 只读收发。 |
 | `test_rtps_transmitter_lifecycle` | RTPS 发送/启停并发、恢复、普通消息序列化中途关闭及受控 Hybrid 路由变化。 |
@@ -66,6 +67,60 @@ topology manager、log、getenv；不会启动它们。`make benchmarks` 仅构�
 同机强制 RTPS 只验证强制 RTPS 数据路径，不代表跨主机自动选路。普通并发回归
 只能覆盖所编排的交错，不证明没有所有竞态；Notifier 完整性测试也不证明全面的
 内存序正确性。UBSan 和 TSan 是同一测试的不同构建方式，不需要复制测试源文件。
+
+## Notifier 槽位保护回归
+
+`test_condition_notifier` 属于 `check-integration`，只链接 Notifier、ReadableInfo、
+Logger、pthread、libatomic 和 GoogleTest；该目标不依赖 Fast DDS 库或调度器。
+运行需要 Linux SysV SHM、`fork`、`exec /proc/self/exe`、pipe/poll/waitpid。
+
+覆盖读者持槽位锁直到写者绕回、丢弃不推进序号、Listen 超时不改输出、解锁恢复、
+发布锁持有期间超过三圈的竞争尝试全部失败、慢读者三圈后从最早保留通知恢复、
+4 写者各 16000 次尝试的字段一致性/无重复/成功数与序号一致、压力后收发恢复，
+以及空参数、关闭、非正超时和序号耗尽。压力测试允许丢弃，不以收齐全部通知
+为通过条件，但每条收到的通知都必须对应成功的发布。
+
+暂停编排通过 friend 测试访问器取得实际发布锁，再恢复执行 Notify 使用的
+同一个 `PublishLocked` 实现；没有生产运行时回调或睡眠注入。fork+exec 子进程
+分别持槽位锁/发布锁、独立打开并广播读取 128 条通知，验证无后续消息时的超时。
+独立 wire fixture 核对实际头部，并覆盖旧无版本布局、1 字节/错误段长、错误
+magic/版本/大小/对齐/容量/偏移，以及零标记未初始化区；拒绝前后比较整个共享区，
+检查资源未被删除、映射已解除。
+
+父子管道和 waitpid 等待均有 5 秒上限，子进程 Listen 使用 1000ms 或 30ms
+超时；父进程析构会终止并回收未退出的子进程。每个测试只移除自身独占创建的
+SysV 资源，不清理全局通知区。运行器另给整个程序 30 秒硬超时。
+以下是仓库根目录的可复用示例：
+
+```sh
+make -C example -j2 BUILD_DIR=/tmp/cmw-guide-notifier test_condition_notifier
+CMW_PATH="$PWD" bash example/run_tests.sh \
+  --bin-dir /tmp/cmw-guide-notifier/bin --timeout 30 test_condition_notifier
+```
+
+中间件相关回归共享默认通知区。若本机仍保留旧布局，可在系统允许非特权用户
+命名空间时用 `unshare --user --map-root-user --ipc` 为测试隔离 IPC，不触碰旧区：
+
+```sh
+make -C example -j2 BUILD_DIR=/tmp/cmw-guide-notifier \
+  test_shm_block_lease_generation test_shm_loaned_message
+CMW_PATH="$PWD" unshare --user --map-root-user --ipc \
+  bash example/run_tests.sh --bin-dir /tmp/cmw-guide-notifier/bin --timeout 90 \
+  test_shm_block_lease_generation test_shm_loaned_message
+```
+
+ASan、UBSan 可分别用 `SANITIZE=address`、`SANITIZE=undefined` 和独立 BUILD_DIR
+构建此目标。TSan 用 `SANITIZE=thread`，线程测试使用同一映射，便于检测实际
+槽位复制冲突；TSan 不证明跨进程同步正确性，独立进程行为由 exec 测试验证。
+若 TSan 启动报 `unexpected memory mapping`，可在系统允许时用
+`setarch x86_64 -R` 仅关闭该测试进程的 ASLR 后复验；须保留首次失败记录，
+不得把未启动的尝试记为通过。
+本测试只验证通知与明确编排的同步，不验证进程崩溃恢复或真实跨主机通信。
+`test_hybrid_shm_multiprocess` 与 `test_loaned_message_dynamic_shm_lifecycle`
+在父进程测试结束后显式 Shutdown 调度器和已创建的 SHM dispatcher，确保工作线程
+先于进程静态调度表退出；测试断言失败后也执行该清理。
+具体返回规则、ABI 和并发边界以 [README](../README.md#notifier-槽位保护与丢弃策略)
+为准，实际命令与 sanitizer 成功或环境阻止启动的结果见 [testlog](testlog.md)。
 
 ## 共享区无 vptr 回归
 

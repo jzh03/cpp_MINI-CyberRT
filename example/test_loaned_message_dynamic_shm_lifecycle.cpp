@@ -15,6 +15,8 @@
 #include <cmw/common/global_data.h>
 #include <cmw/discovery/topology_manager.h>
 #include <cmw/init.h>
+#include <cmw/scheduler/scheduler_factory.h>
+#include <cmw/transport/dispatcher/shm_dispatcher.h>
 #include <cmw/node/publisher.h>
 #include <cmw/node/subscriber.h>
 #include <cmw/transport/message/loaned_message.h>
@@ -229,5 +231,10 @@ TEST(LoanedMessageDynamicShmLifecycleTest,
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
+  const int result = RUN_ALL_TESTS();
+  // Join workers before process-static ClassicContext tables are destroyed.
+  hnu::cmw::scheduler::Instance()->Shutdown();
+  auto dispatcher = hnu::cmw::transport::ShmDispatcher::Instance(false);
+  if(dispatcher != nullptr) dispatcher->Shutdown();
+  return result;
 }

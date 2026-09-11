@@ -91,7 +91,7 @@ FAST_TEST_TARGETS := test_serialize test_blocker test_node \
                      test_shm_loaned_message test_shm_transmitter_lifecycle_regression \
                      test_loaned_message_hybrid test_hybrid_intra \
                      test_intra_transmitter_lifecycle test_logger_paths
-INTEGRATION_TEST_TARGETS := test_shm_segment_exec test_posix_segment_multiprocess \
+INTEGRATION_TEST_TARGETS := test_condition_notifier test_shm_segment_exec test_posix_segment_multiprocess \
                             test_loaned_message_dynamic_shm_lifecycle \
                             test_shm_loaned_message_multiprocess \
                             test_hybrid_shm_multiprocess \
@@ -197,6 +197,10 @@ $(SUBSCRIBER_BIN): $(SUBSCRIBER_CORE_OBJS) $(SUBSCRIBER_OBJ) Makefile | check-fa
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
 
 $(BIN_DIR)/test_class_loader: LDFLAGS += -Wl,--export-dynamic
+
+# Notifier tests need no DDS or scheduler; keep sanitizer runs focused.
+$(BIN_DIR)/test_condition_notifier: $(OBJ_DIR)/transport/shm/condition_notifier.o $(OBJ_DIR)/transport/shm/readable_info.o $(OBJ_DIR)/log/logger.o $(OBJ_DIR)/example/test_condition_notifier.o Makefile | $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) -lpthread -latomic -lgtest
 
 # Logger path checks need no transport, Discovery, or scheduler runtime.
 $(BIN_DIR)/test_logger_paths: $(OBJ_DIR)/log/logger.o $(OBJ_DIR)/example/test_logger_paths.o Makefile | $(BIN_DIR)

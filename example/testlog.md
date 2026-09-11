@@ -324,3 +324,246 @@ CMW_PATH=/home/jim/cpp/CyberRT bash example/run_tests.sh --bin-dir /tmp/cmw-log-
 55 个文件（52 个迁移日志、迁移清单、构建输出、测试输出）全部位于 log/ 内。
 `git diff --check` 无输出。Git 忽略规则仅覆盖 log/ 下的 `.log` 和 `.log.*`，
 不会忽略 logger 源码，也不会掩盖其他目录意外生成的日志。未 commit 或 push。
+
+
+## 2026-09-11 Notifier 发布短锁、槽位互斥及丢弃策略
+
+工作目录 `/home/jim/cpp/CyberRT`；分支 `dev`，开始及验证时 HEAD 为
+`2ea84d5aab570209b24d3d7aa45ace666bff9992`，本轮改动未提交。
+环境：Linux jim-VM `6.8.0-138-generic` x86_64、Ubuntu GCC 11.4.0、C++14，
+4 CPU，内存约 3.8GiB。本地 Fast DDS 使用
+`/home/jim/cpp/fastdds_2.12/install`，外部 DDS 库未以 sanitizer 重编译。
+构建、运行器输出及诊断 `.log` 均在根目录 `log/notifier-20260911/`；
+程序 Logger 日志继续按追加方式写入根目录 `log/<程序名>.log`。
+
+本轮功能为 Notifier 独立 v1 布局、发布锁和槽位锁，不改变 Payload Segment v2。
+测试代码及入口说明见 [TESTING](TESTING.md#notifier-槽位保护回归)，行为约定见
+[README](../README.md#notifier-槽位保护与丢弃策略)。
+
+### 首轮定向构建与执行
+
+以下命令实际在上述工作目录执行。首次构建退出 0；修正独立布局 fixture 的
+预期槽位大小/偏移后再次构建退出 0（此前尚未运行程序），首轮 9 项测试通过，
+运行器退出 0，没有失败或超时。随后增加“实际头部与独立 fixture 相符”的正向
+测试及错误 magic 场景，最终回归中的 Notifier 为 10 项。
+
+```sh
+mkdir -p log/notifier-20260911
+make -C example -j2 BUILD_DIR=/tmp/cyberrt-notifier-normal test_condition_notifier > log/notifier-20260911/build-normal.log 2>&1
+make -C example -j2 BUILD_DIR=/tmp/cyberrt-notifier-normal test_condition_notifier > log/notifier-20260911/rebuild-normal.log 2>&1
+CMW_PATH="$PWD" bash example/run_tests.sh --bin-dir /tmp/cyberrt-notifier-normal/bin --timeout 30 test_condition_notifier > log/notifier-20260911/notifier-normal.log 2>&1
+```
+
+`ipcs -m` 显示宿主命名空间有旧通知区 key `0x31c7e6c9`、shmid `19`、
+196616 字节、连接数 0。本轮未删除、修改该区。先确认非特权 IPC 隔离可用：
+
+```sh
+unshare --user --map-root-user --ipc sh -c 'ipcs -m' > log/notifier-20260911/ipc-isolation.log 2>&1
+```
+
+退出 0，隔离命名空间无共享段。后续中间件回归在独立 IPC 命名空间依次运行；
+各测试自身正常清理独占资源，命名空间退出还会回收其剩余 SysV 资源。
+
+### 普通、UBSan、ASan 相关回归
+
+实际完整命令如下；三个 BUILD_DIR 相互隔离，初始均为本轮新建目录（normal
+在上面的定向测试中先建）。每个程序外部超时 90 秒，未设置 GoogleTest 过滤。
+UBSan 开关保留 `undefined,vptr`、`-fno-sanitize-recover=all` 和 PIE；ASan 为
+non-PIE，启用 frame pointer，未禁用泄漏检查或添加 suppression。
+
+```sh
+set -u
+regression_tests='test_condition_notifier test_shm_segment_exec test_shm_segment_robustness test_shm_block_lease_generation test_shm_dispatcher_robustness test_shm_transmitter_receiver test_shm_loaned_message test_shm_transmitter_lifecycle_regression test_posix_segment_multiprocess test_shm_loaned_message_multiprocess test_hybrid_shm_multiprocess test_hybrid_dynamic_shm_lifecycle test_loaned_message_dynamic_shm_lifecycle test_loaned_message_hybrid test_loaned_message_discovery_churn'
+for config in normal undefined address; do
+  BUILD_DIR="/tmp/cyberrt-notifier-$config"
+  make -C example -j2 BUILD_DIR="$BUILD_DIR" SANITIZE="$config" $regression_tests > "log/notifier-20260911/build-$config-regression.log" 2>&1
+  build_status=$?
+  echo "$config build exit=$build_status"
+  if test "$build_status" -eq 0; then
+    CMW_PATH="$PWD" UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ASAN_OPTIONS=halt_on_error=1 unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir "$BUILD_DIR/bin" --timeout 90 $regression_tests > "log/notifier-20260911/regression-$config.log" 2>&1
+    echo "$config regression exit=$?"
+  fi
+done
+```
+
+已完成的普通和 UBSan 两组构建、运行均退出 0，各 15 个程序、43 项测试通过，
+没有失败、超时或 UBSan runtime error。普通并发压力本次成功发布 22693 条、
+丢弃 41307 条、接收 8927 条；UBSan 分别为 24034、39966、6791。接收条数因
+竞争丢弃和慢读者绕环而少于尝试条数，测试核对完整字段、无重复、每条接收都
+对应成功发布、成功数与发布位置相符，以及压力后恢复。具体计数不是性能指标。
+
+### TSan 首次启动失败与复验
+
+TSan 使用独立目录，仅构建不依赖 DDS 的通知测试。保留 non-PIE、frame pointer
+及 `halt_on_error=1`，未屏蔽竞态检查。实际命令：
+
+```sh
+make -C example -j1 BUILD_DIR=/tmp/cyberrt-notifier-thread SANITIZE=thread test_condition_notifier > log/notifier-20260911/build-thread.log 2>&1
+build_status=$?
+echo "thread build exit=$build_status"
+if test "$build_status" -eq 0; then
+  CMW_PATH="$PWD" TSAN_OPTIONS=halt_on_error=1 timeout 30 /tmp/cyberrt-notifier-thread/bin/test_condition_notifier --gtest_filter='NotifierTest.*-NotifierTest.Exec*' > log/notifier-20260911/notifier-thread.log 2>&1
+  echo "thread tests exit=$?"
+fi
+```
+
+构建退出 0；首次运行退出 66，在 GoogleTest 启动前报
+`FATAL: ThreadSanitizer: unexpected memory mapping 0x74bde48ae000-0x74bde4d00000`。
+这是环境阻止启动，不能记为测试通过。随后仅对测试进程关闭 ASLR：
+
+```sh
+CMW_PATH="$PWD" TSAN_OPTIONS=halt_on_error=1 setarch x86_64 -R timeout 30 /tmp/cyberrt-notifier-thread/bin/test_condition_notifier --gtest_filter='NotifierTest.*-NotifierTest.Exec*' > log/notifier-20260911/notifier-thread-noaslr.log 2>&1
+status=$?
+echo "thread no-ASLR exit=$status"
+cat log/notifier-20260911/notifier-thread-noaslr.log
+```
+
+复验退出 0，7 项全部通过，没有 TSan 报告。压力成功发布 18439、丢弃 45561、
+接收 5368。TSan 线程压力使用同一映射；本次 TSan 过滤掉 exec 测试和布局拒绝
+套件，不把它的结论扩大为跨进程内存序证明，也未执行整个中间件的 TSan 回归。
+独立进程共享锁、广播、超时及布局拒绝由普通/UBSan/ASan 的完整通知测试覆盖。
+
+
+### ASan 首轮失败、原因与修复
+
+上面的 ASan 原组构建成功，运行失败：原始运行器汇总为 `passed=12 failed=3
+ timed_out=0`，详情保留在 `log/notifier-20260911/regression-address.log`。
+该汇总对两次超时分类不准确：日志明确记录两个程序超过 90s 后被 watchdog
+终止，运行器却归入 signal 15（143），不能据此声称没有超时。
+
+- `test_hybrid_shm_multiprocess` 和 `test_loaned_message_dynamic_shm_lifecycle`
+  功能断言已通过，但退出阶段 ASan 报 heap-use-after-free，随后未退出并分别
+  被 90s watchdog 终止。程序未停止调度线程，线程仍访问进程静态的
+  `ClassicContext::notify_grp_`；PC 的离线符号定位和源码与此对应。
+- `test_hybrid_dynamic_shm_lifecycle` 的子进程 ASan 报 heap-buffer-overflow：
+  `Manager::Write` 在 `manager.cpp:271` 复制 256 字节，但 DDS change 仅申请了
+  255 字节；父进程因子进程失败而退出 1。
+- Notifier 10 项在该 ASan 原组中通过，压力成功 10375、丢弃 53625、接收 6762。
+  其他 11 个通过程序以原始汇总为准，不将“功能断言通过但退出异常”算作通过。
+
+实际符号定位命令（退出 0）：
+
+```sh
+addr2line -Cfipe /tmp/cyberrt-notifier-address/bin/test_hybrid_shm_multiprocess 0x5615c9
+```
+
+结果为 `std::_Hashtable<std::string, std::pair<const std::string, int>, ...>::
+_M_find_before_node`，`/usr/include/c++/11/bits/hashtable.h:1833`。结合调度器源码
+中 `NOTIFY_GRP` 的类型和 Wait 访问，修复两个测试主函数在 RUN_ALL_TESTS 返回后
+显式停止并 join 调度器、停止已存在的 SHM dispatcher，不修改调度器全局退出 API。
+Discovery 写入改为按真实序列化长度申请并检查 change/容量，失败返回 false，
+History 未接管的 change 被释放。动态 SHM 测试的 message_type 附加 256 字符，
+确保不依赖 PID/时间戳长度也能覆盖超过旧固定容量的情况。
+
+三个失败程序的 ASan 针对性复验实际命令：
+
+```sh
+set -u
+repair_tests='test_hybrid_shm_multiprocess test_hybrid_dynamic_shm_lifecycle test_loaned_message_dynamic_shm_lifecycle'
+make -C example -j2 BUILD_DIR=/tmp/cyberrt-notifier-address SANITIZE=address $repair_tests > log/notifier-20260911/build-address-repair.log 2>&1
+build_status=$?
+echo "address repair build exit=$build_status"
+if test "$build_status" -eq 0; then
+  CMW_PATH="$PWD" ASAN_OPTIONS=halt_on_error=1 unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir /tmp/cyberrt-notifier-address/bin --timeout 90 $repair_tests > log/notifier-20260911/address-repair.log 2>&1
+  echo "address repair tests exit=$?"
+fi
+```
+
+
+上述针对性复验构建退出 0，3 个程序均通过，运行器退出 0，没有 ASan 报告或超时。
+由于 Discovery 核心实现有修复，再次执行最终 15 程序回归，实际命令如下：
+
+```sh
+set -u
+regression_tests='test_condition_notifier test_shm_segment_exec test_shm_segment_robustness test_shm_block_lease_generation test_shm_dispatcher_robustness test_shm_transmitter_receiver test_shm_loaned_message test_shm_transmitter_lifecycle_regression test_posix_segment_multiprocess test_shm_loaned_message_multiprocess test_hybrid_shm_multiprocess test_hybrid_dynamic_shm_lifecycle test_loaned_message_dynamic_shm_lifecycle test_loaned_message_hybrid test_loaned_message_discovery_churn'
+for config in normal undefined address; do
+  BUILD_DIR="/tmp/cyberrt-notifier-$config"
+  make -C example -j2 BUILD_DIR="$BUILD_DIR" SANITIZE="$config" $regression_tests > "log/notifier-20260911/build-$config-final.log" 2>&1
+  build_status=$?
+  echo "$config final build exit=$build_status"
+  if test "$build_status" -eq 0; then
+    CMW_PATH="$PWD" UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ASAN_OPTIONS=halt_on_error=1 unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir "$BUILD_DIR/bin" --timeout 90 $regression_tests > "log/notifier-20260911/regression-$config-final.log" 2>&1
+    echo "$config final regression exit=$?"
+  fi
+done
+```
+
+
+最终三组构建及运行均退出 0，各 **15 个程序、43 项测试通过**，没有失败、
+超时、ASan/LeakSanitizer 报告或 UBSan runtime error。最终日志分别为
+`log/notifier-20260911/regression-normal-final.log`、
+`log/notifier-20260911/regression-undefined-final.log`、
+`log/notifier-20260911/regression-address-final.log`；对应构建输出为
+`build-normal-final.log`、`build-undefined-final.log`、`build-address-final.log`
+（同一日志目录）。此前失败日志保持原样，未被成功结果覆盖。
+
+本轮验证包含同机 INTRA、真实跨进程 SHM、独立 exec 通知区访问及受控 Hybrid
+元数据选路；DDS 用于同机 Discovery。没有真实跨主机验证，没有重跑所有 RTPS
+数据路径，也不承诺持锁进程崩溃恢复。TSan 仅为上述 7 项线程测试。
+
+### 文档、构建入口与工作区检查
+
+本轮已实际检查本地 Markdown 文件和标题锚点、TESTING 中的测试源文件及 Makefile
+注册、Notifier 的 integration 入口，以及 `git diff --check`。新测试未跟踪时另检
+尾部空白。检查脚本的完整实际内容如下（脚本不生成程序运行日志）：
+
+```sh
+cat > /tmp/cyberrt-notifier-doc-check.py <<'PY'
+import pathlib
+import re
+import subprocess
+root = pathlib.Path('/home/jim/cpp/CyberRT')
+paths = ['README.md', 'example/TESTING.md', 'example/testlog.md']
+for path in paths:
+    source = root / path
+    for target in re.findall(r'\[[^\]]*\]\(([^)]+)\)', source.read_text()):
+        if '://' in target:
+            continue
+        name, sep, anchor = target.partition('#')
+        dest = (source.parent / name).resolve() if name else source
+        assert dest.exists(), (path, target)
+        if sep:
+            anchors = set()
+            for title in re.findall(r'^#+\s+(.+)$', dest.read_text(), re.M):
+                anchors.add(re.sub(r'[^\w\-\s]', '', title.lower()).replace(' ', '-'))
+            assert anchor in anchors, (path, target, anchors)
+print('PASS local Markdown files and heading anchors')
+makefile = (root / 'example/Makefile').read_text()
+for name in set(re.findall(r'\btest_[a-z0-9_]+\b', (root / 'example/TESTING.md').read_text())):
+    assert (root / 'example' / (name + '.cpp')).exists(), name
+    assert name in makefile, name
+assert 'INTEGRATION_TEST_TARGETS := test_condition_notifier' in makefile
+print('PASS documented test sources and Makefile registration')
+subprocess.run(['git', 'diff', '--check'], cwd=root, check=True)
+# git diff does not include an untracked new source file.
+for number, line in enumerate((root / 'example/test_condition_notifier.cpp').read_text().splitlines(), 1):
+    assert line == line.rstrip(), number
+print('PASS git diff --check and new test whitespace')
+PY
+python3 /tmp/cyberrt-notifier-doc-check.py > log/notifier-20260911/doc-check-initial.log 2>&1
+```
+
+首次检查退出 0。修复回归问题并更新文档后再次执行（退出 0）：
+
+```sh
+python3 /tmp/cyberrt-notifier-doc-check.py > log/notifier-20260911/doc-check-repair.log 2>&1
+status=$?
+echo "repair doc check exit=$status"
+cat log/notifier-20260911/doc-check-repair.log
+ipcs -m > log/notifier-20260911/ipc-final.log
+```
+
+`ipc-final.log` 确认宿主命名空间仍只有原 key `0x31c7e6c9`、shmid `19`、
+196616 字节、连接数 0 的旧通知区，没有遗留本轮定向测试资源。
+
+最终内容的检查命令（在上述工作目录）：
+
+```sh
+python3 /tmp/cyberrt-notifier-doc-check.py > log/notifier-20260911/doc-check-final.log 2>&1
+git diff --check
+git status --short
+git rev-parse HEAD
+```
+
+最终文档/链接/入口和空白检查退出 0，HEAD 未改变。变更保留在 dev 工作区，
+没有提交、推送或清理宿主旧通知区。

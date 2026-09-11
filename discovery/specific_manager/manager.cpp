@@ -1,5 +1,6 @@
 
 #include <cmw/discovery/specific_manager/manager.h>
+#include <limits>
 #include <cmw/common/global_data.h>
 #include <cmw/transport/rtps/attributes_filler.h>
 #include <fastrtps/rtps/RTPSDomain.h>
@@ -257,28 +258,30 @@ bool Manager::Write(const ChangeMsg& msg){
   serialize::DataStream ds;
   ds << msg;
   
-  {
-    //
-    std::lock_guard<std::mutex> lg(lock_);
-    if(writer_ != nullptr){
-    //发送数据
-    CacheChange_t* ch = writer_->new_change([]() -> uint32_t
-                        {
-                          return 255;
-                        }, ALIVE);
-    //数据装载 
-    ch->serializedPayload.length = ds.size();
-    std::memcpy((char*)ch->serializedPayload.data , ds.data(), ds.size());
-    
-    bool flag = writer_history_->add_change(ch);
-    if(!flag)
-    {
-        writer_->remove_older_changes(20);
-        writer_history_->add_change(ch);
-    }
-    }
+  const size_t size = ds.size();
+  if(size > std::numeric_limits<uint32_t>::max()) return false;
+  std::lock_guard<std::mutex> lg(lock_);
+  if(!is_discovery_started_.load() || writer_ == nullptr ||
+     writer_history_ == nullptr) return false;
+
+  // Topology strings have variable length; 255 bytes is not an upper bound.
+  CacheChange_t* change = writer_->new_change(
+      [size]() { return static_cast<uint32_t>(size); }, ALIVE);
+  if(change == nullptr) return false;
+  if(change->serializedPayload.data == nullptr ||
+     change->serializedPayload.max_size < size) {
+    writer_->release_change(change);
+    return false;
   }
-  return true;
+  change->serializedPayload.length = static_cast<uint32_t>(size);
+  std::memcpy(change->serializedPayload.data, ds.data(), size);
+  bool added = writer_history_->add_change(change);
+  if(!added) {
+    writer_->remove_older_changes(20);
+    added = writer_history_->add_change(change);
+  }
+  if(!added) writer_->release_change(change);
+  return added;
 }
 
 

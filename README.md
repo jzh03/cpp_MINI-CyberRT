@@ -126,9 +126,54 @@ heap Loan 获取后变成纯 SHM，沿用复制入 SHM 的路径。一次 Hybrid
 - State、Block、ReadableInfo 和 Indicator 的共享区内容不包含进程私有的虚表指针；原子成员仍正常构造。Segment、Notifier 等进程内管理对象保留多态。
 - 布局版本为 2，尾部元数据记录容量及 State/Block 的大小和对齐信息。打开共享段时先核对实际长度、版本、ABI 和 Payload 边界，再访问 State；不兼容时仅解除映射，不修改引用计数或删除旧段。
 - ShmConf 的保守分配公式为 `4096 + 1024 + (1024 + block_buf_size) * block_num`。元数据从实际段末尾复制到本地后校验，定位不依赖 State，允许尾标记起点未对齐。
-- Payload 起点为 `sizeof(State) + block_num * sizeof(Block)`，Block 数据步长仍为 `block_buf_size`。ReadableInfo 保留原有零值 `reserved_`，通知区布局不变。
+- Payload 起点为 `sizeof(State) + block_num * sizeof(Block)`，Block 数据步长仍为 `block_buf_size`。ReadableInfo 保留原有零值 `reserved_`。Notifier 通知区独立版本化，见下节。
 - 不支持旧布局混用、在线迁移或其他进程并发截断现有映射。升级前停止相关旧进程，确认具体 channel 的 POSIX `/cmw_<channel_id>` 或 XSI key/shmid，只清理对应旧段，再启动全部新版进程重建。不要全局清理 `/dev/shm` 或批量 `ipcrm`。
 - 更早版本遗留的通知区同样需要在停止旧进程后人工确认、重建，不应与旧程序混用。
+
+### Notifier 槽位保护与丢弃策略
+
+ConditionNotifier 使用 4096 槽位的广播环，采用“发布短锁＋槽位读写互斥＋允许丢弃”。
+发布锁和每个槽位锁均为共享区内的 32 位原子量，使用 acquire/release；构建要求
+32/64 位原子操作始终 lock-free，不能依赖进程私有的后备锁。本实现面向相同 ABI
+的 Linux 进程，不承诺跨平台共享内存 ABI。
+
+写者只尝试一次发布锁，再尝试一次目标槽位锁；取得两者后写入完整 ReadableInfo
+及槽位序号，再推进已发布位置，依次释放槽位锁、发布锁。只有成功写入才消耗
+序号，暂停的写者不会被其他写者越过。读者取得同一槽位锁后核对序号并复制
+`host_id / channel_id / block_index / generation`；锁不覆盖 Payload 读取或用户回调。
+
+| 场景 | 行为与返回值 |
+| --- | --- |
+| 写者拿不到发布锁或槽位锁 | 丢弃本次新通知，`Notify()` 返回 false，不推进序号；无内部重试。 |
+| 写入成功 | `Notify()` 返回 true，表示通知已发布，不保证所有读者收到。 |
+| 慢读者落后超过一圈 | 跳过覆盖部分，从当时仍保留的最早通知继续读；并发绕环时重新核对位置。 |
+| 读者遇到忙槽位 | 在 `Listen()` 的 steady-clock 截止时间内重试，超时返回 false，输出参数保持不变。 |
+| 多个接收进程 | 每个实例维护自己的游标，互不消费其他实例的通知，保持广播语义。 |
+
+新实例从打开时的已发布位置开始，不回放此前通知。零或负 Listen 超时只尝试
+一次；空输出指针、已关闭或初始化失败均返回 false。64 位序号到达上限后拒绝
+新发布，避免回绕为零。单实例只支持一个 Listen 调用者；可同时有多个 Notify
+调用者。Shutdown/析构须在全部 Notify/Listen 调用结束后进行。
+
+通知区首次引入独立版本 **Notifier v1**，与 **Payload Segment v2** 无关：校验
+实际段长、magic、版本、Indicator/Slot/ReadableInfo 大小、槽位及通知对齐、容量
+和槽位偏移后才访问锁及游标。创建者构造完成后以 release 发布 magic；打开者
+最多等待 100ms，未初始化或不兼容时明确失败，不改写、删除旧区，也不自动重建。
+初始化失败的实例须销毁后重新创建才能重试。旧通知区升级前须停止相关进程，
+确认具体 key/shmid 后单独重建；Payload 数据区布局本次不变。
+
+原子锁不支持持锁进程崩溃后的自动恢复；进程暂停期间，竞争写者允许丢弃，读者
+仍按超时退出。持锁进程永久退出时，需停止相关进程后重建通知区。通知成功也
+不保证 Payload 仍可读，Payload 的 Lease/generation 检查继续生效。
+测试覆盖和运行方式见 [Notifier 测试指南](example/TESTING.md#notifier-槽位保护回归)，
+本地执行证据见 [测试日志](example/testlog.md)。
+
+### Discovery 拓扑通知容量
+
+Discovery 拓扑通知按实际序列化长度向 DDS 申请缓冲区，避免长 channel/node/type
+元数据超过旧的 255 字节固定容量时越界。长度超出 DDS 的 32 位范围、分配失败、
+容量不足或 History 提交失败时返回 false，未提交的 change 会释放；本地拓扑
+Dispose 已执行的状态不因远端发送失败而回滚。
 
 ### 统一日志目录
 
