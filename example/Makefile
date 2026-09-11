@@ -12,7 +12,8 @@ BIN_DIR           := $(BUILD_DIR)/bin
 COMPAT_INC_DIR    := $(BUILD_DIR)/include
 CMW_INCLUDE_LINK  := $(COMPAT_INC_DIR)/cmw
 
-CPPFLAGS := -I$(COMPAT_INC_DIR) \
+CPPFLAGS := -DCMW_PROJECT_ROOT='"$(PROJECT_ROOT)"' \
+            -I$(COMPAT_INC_DIR) \
             -I$(PROJECT_ROOT)/thirdparty \
             -I$(FAST_DDS_INC_DIR)
 # C++14 otherwise uses unaligned new for cache-line-aligned runtime objects
@@ -89,7 +90,7 @@ FAST_TEST_TARGETS := test_serialize test_blocker test_node \
                      test_shm_dispatcher_robustness test_shm_transmitter_receiver \
                      test_shm_loaned_message test_shm_transmitter_lifecycle_regression \
                      test_loaned_message_hybrid test_hybrid_intra \
-                     test_intra_transmitter_lifecycle
+                     test_intra_transmitter_lifecycle test_logger_paths
 INTEGRATION_TEST_TARGETS := test_shm_segment_exec test_posix_segment_multiprocess \
                             test_loaned_message_dynamic_shm_lifecycle \
                             test_shm_loaned_message_multiprocess \
@@ -197,6 +198,10 @@ $(SUBSCRIBER_BIN): $(SUBSCRIBER_CORE_OBJS) $(SUBSCRIBER_OBJ) Makefile | check-fa
 
 $(BIN_DIR)/test_class_loader: LDFLAGS += -Wl,--export-dynamic
 
+# Logger path checks need no transport, Discovery, or scheduler runtime.
+$(BIN_DIR)/test_logger_paths: $(OBJ_DIR)/log/logger.o $(OBJ_DIR)/example/test_logger_paths.o Makefile | $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) -lpthread -lgtest
+
 $(BIN_DIR)/test_%: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/test_%.o Makefile | check-fastdds $(BIN_DIR)
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS) -lgtest
 
@@ -227,4 +232,4 @@ $(BIN_DIR):
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(CLASS_LOADER_PLUGINS)
-	rm -f $(CURDIR)/*.log
+	# Runtime logs and archived logs in $(PROJECT_ROOT)/log are retained.

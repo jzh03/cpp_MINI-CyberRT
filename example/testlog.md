@@ -2,6 +2,8 @@
 
 测试简介和使用指南见 [TESTING.md](TESTING.md)。本文件记录实际执行结果、
 环境限制及布局测量；较早的失败记录保留，后续复跑结果单独记录。
+功能性更新见 [README](../README.md)，文档职责见 [AGENTS.md](../AGENTS.md)。
+历史条目未给出完整命令的部分保留原记录，不将使用指南中的示例补写为已执行命令。
 
 ## 2026-09-10 首轮验证
 
@@ -63,10 +65,8 @@ CMW_PATH="$PWD" UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 
 ## 本次共享内存布局核对
 
-State 和 Block 不再含虚析构；原子成员仍由 placement new 正常构造。
-ReadableInfo 保留原有零值 `reserved_`，用于保留原先的首字占位，里面没有函数地址。
-Indicator 本身也无多态。Segment、PosixSegment、XsiSegment、ShmConf、
-ConditionNotifier/NotifierBase 是进程内管理对象，保留原有多态。
+布局机制和升级兼容性见 [README](../README.md#共享区布局-v2-与兼容性)。
+下面保留当时实际测量的 ABI 数据。
 
 本次采用新布局，不给 State/Block 增加占位。当前 x86-64 GCC 实测如下：
 
@@ -80,15 +80,7 @@ ConditionNotifier/NotifierBase 是进程内管理对象，保留原有多态。
 | 默认 512 块的 Payload 起点 | 20520 | 16416 |
 | 尾部布局头长度 | 24 | 32 |
 
-一般 Payload 起点为 `sizeof(State) + block_num * sizeof(Block)`，各块数据
-步长仍为 `block_buf_size`。ShmConf 原有保守分配公式不变：
-`4096 + 1024 + (1024 + block_buf_size) * block_num`，默认段为 9442304 字节。
-尾部元数据版本升为 2，增加容量、State/Block 对齐信息。打开时首先使用
-POSIX `fstat().st_size` 或 XSI `shmctl(IPC_STAT).shm_segsz`，从实际段末尾
-复制普通元数据到本地结构（允许末尾未对齐），然后核对标记、版本、ABI、
-容量档位、精确总长、Payload 边界，最后才访问 State 并核对其容量。
-元数据定位不依赖 State。失败只解除映射，不增加/减少引用计数、不析构对象、
-不删除不兼容段。此检查用于布局兼容性，不支持其他进程并发截断现有映射。
+当时记录的默认段大小为 9442304 字节；实现约定统一维护在 README。
 
 ## 更早的环境记录（日期未记录）
 
@@ -200,5 +192,135 @@ Fast DDS 库沿用本地安装，未使用 sanitizer 重编译。RTPS 数据路�
 不在承诺范围内，TSan 未能启动。
 
 最终 `git diff --check` 通过；新增未跟踪测试文件也单独检查空白错误。改动保留
-在 dev 工作区供审阅，未提交或推送。运行时核心变更见 TESTING.md 的同步约定，
+在 dev 工作区供审阅，未提交或推送。运行时核心变更见 [README 的同步约定](../README.md#发送端生命周期与并发边界)，
 其余主要为三个新测试入口、共享测试辅助头、现有 SHM/RTPS 编排补强与验证说明。
+
+
+## 2026-09-11 文档职责整理
+
+起始分支 `dev`，HEAD `b72973e7548d78e4672db7f5c2bf55b5d8f07f94`，工作区干净。
+新建根目录 AGENTS.md；将功能和同步/兼容性说明归入 README.md，测试程序介绍
+与使用指南集中到 TESTING.md，历史实际命令、失败与复验结果保留在本文件。
+本次仅修改这四份 Markdown 文档，未构建或运行中间件测试；上述历史通过结果
+不代表本次重新执行。未补造历史缺失命令。
+
+文档检查实际工作目录为 `/home/jim/cpp/CyberRT`，完整命令如下。
+只检查本地链接，不访问 README 引用的外部网页；`bash -n` 仅检查语法，不执行示例。
+
+```sh
+python3 - <<'DOC_CHECK'
+from pathlib import Path
+import re
+import subprocess
+from urllib.parse import unquote
+
+files = [Path(p) for p in (
+    'AGENTS.md', 'README.md', 'example/TESTING.md', 'example/testlog.md')]
+for path in files:
+    content = re.sub(r'```.*?```', '', path.read_text(), flags=re.S)
+    for link in re.findall(r'\[[^\]]*\]\(([^)]+)\)', content):
+        if '://' in link:
+            continue
+        name, _, anchor = unquote(link).partition('#')
+        target = path.parent / name if name else path
+        assert target.is_file(), (path, link)
+        if anchor:
+            headings = re.findall(r'^#+ (.+)$', target.read_text(), re.M)
+            anchors = {re.sub(r'[^\w\s-]', '', h.lower()).replace(' ', '-')
+                       for h in headings}
+            assert anchor in anchors, (path, link)
+makefile = Path('example/Makefile').read_text().replace('\\\n', ' ')
+guide = Path('example/TESTING.md').read_text()
+count = 0
+for group in ('FAST_TEST_TARGETS', 'INTEGRATION_TEST_TARGETS', 'BENCHMARK_TARGETS'):
+    targets = re.search(r'^' + group + r'\s*:=\s*(.+)$', makefile, re.M).group(1).split()
+    for target in targets:
+        assert '`' + target + '`' in guide, target
+    count += len(targets)
+blocks = re.findall(r'```sh\n(.*?)```', guide, re.S)
+for block in blocks:
+    subprocess.run(['bash', '-n'], input=block, text=True, check=True)
+subprocess.run(['git', 'diff', '--check'], check=True)
+result = subprocess.run(['git', 'diff', '--no-index', '--check', '/dev/null', 'AGENTS.md'],
+                        capture_output=True, text=True)
+assert result.returncode in (0, 1) and not result.stdout and not result.stderr, result
+print(f'PASS: {len(files)} documents, local links/anchors, {count} targets, '
+      f'{len(blocks)} shell examples, whitespace checks')
+DOC_CHECK
+```
+
+检查退出码 0，输出：
+
+```text
+PASS: 4 documents, local links/anchors, 27 targets, 7 shell examples, whitespace checks
+```
+
+本地链接与锚点、27 个正式回归/性能目标的介绍、示例命令语法及空白检查全部通过。
+`git diff --check` 无输出；新增 AGENTS.md 也单独通过空白检查。
+
+## 2026-09-11 统一日志目录
+
+分支 `dev`，HEAD `b72973e7548d78e4672db7f5c2bf55b5d8f07f94`。
+开始时 README.md、TESTING.md、testlog.md 和新建的 AGENTS.md 有前一轮文档修改，
+本次在其基础上继续更新，没有覆盖或提交这些修改。
+
+根目录原有 log/ 存放 logger 源码，本次复用该目录保存日志，不移动源码。
+项目内 52 个旧 `.log` 按原相对路径迁入 log/：根目录文件进入 log/，example/
+文件进入 log/example/。同名目标存在时另加 migrated 序号，不覆盖；全部文件
+迁移前后 SHA-256 相同。原始路径、目标路径和校验值记录在
+`log/log-migration-1789094668313297180.log`。仓库外的历史 `/tmp` 日志不在此次
+迁移范围内，上文实际命令与历史路径保留。
+
+迁移的完整实际命令（工作目录 `/home/jim/cpp/CyberRT`）：
+
+```sh
+python3 - <<'PY'
+from pathlib import Path
+import hashlib
+import subprocess
+import time
+root = Path.cwd()
+files = subprocess.check_output(['rg', '--files', '-uu', '-g', '*.log', '-g', '!.git/**'], text=True).splitlines()
+records = []
+for name in files:
+    source = Path(name)
+    if source.parts[0] == 'log':
+        continue
+    target = Path('log') / source
+    target.parent.mkdir(parents=True, exist_ok=True)
+    index = 1
+    while target.exists():
+        target = target.with_name(source.stem + '.migrated-' + str(index) + '.log')
+        index += 1
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    source.rename(target)
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == digest
+    records.append(f'{source} -> {target} sha256={digest}')
+manifest = Path('log') / ('log-migration-' + str(time.time_ns()) + '.log')
+manifest.write_text('\n'.join(records) + '\n')
+print(f'Moved {len(records)} logs without overwriting; verified SHA-256; manifest: {manifest}')
+assert all(Path(name).parts[0] == 'log' for name in subprocess.check_output(
+    ['rg', '--files', '-uu', '-g', '*.log', '-g', '!.git/**'], text=True).splitlines())
+PY
+```
+
+日志功能说明见 [README](../README.md#统一日志目录)，使用方法和覆盖见
+[TESTING](TESTING.md#日志路径回归与输出保存)。本次针对性构建、执行命令：
+
+```sh
+make -C example -j2 BUILD_DIR=/tmp/cmw-log-paths test_logger_paths > log/logger-paths-build.log 2>&1
+CMW_PATH=/home/jim/cpp/CyberRT bash example/run_tests.sh --bin-dir /tmp/cmw-log-paths/bin --timeout 30 test_logger_paths > log/logger-paths-test.log 2>&1
+```
+
+构建和测试均退出 0，1 个程序/1 个用例通过，无失败或超时。验证不同 cwd 下
+编译时项目根目录的选择、CMW_PATH 的选择、目录创建、路径文件名处理、缺省
+`.log` 后缀、重复初始化追加、轮转，以及非法路径/符号链接/不可用根目录失败
+且不向 cwd 写日志。测试的临时文件全部位于项目 log/ 内并在结束后回收。
+本轮没有执行中间件完整回归或 sanitizer，不能将前面的历史结果视为本轮复验。
+
+补充检查复用了上一节已完整记录的 DOC_CHECK 命令，退出 0：四份文档的本地
+链接/锚点、28 个正式回归/性能目标、8 段 shell 示例语法及空白检查通过。
+另检查了新增 test_logger_paths.cpp 的空白，并扫描项目内所有 `.log`：当前
+55 个文件（52 个迁移日志、迁移清单、构建输出、测试输出）全部位于 log/ 内。
+`git diff --check` 无输出。Git 忽略规则仅覆盖 log/ 下的 `.log` 和 `.log.*`，
+不会忽略 logger 源码，也不会掩盖其他目录意外生成的日志。未 commit 或 push。

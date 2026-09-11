@@ -33,6 +33,7 @@ class LogStream;
             LOG_COUNT
         };
 
+        // Store only the basename under <project root>/log, never under cwd.
         void open(const string &filename);
         void close();
         void log(Level level, const char* file, int line, const char* format, ...);
