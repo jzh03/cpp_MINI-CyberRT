@@ -567,3 +567,252 @@ git rev-parse HEAD
 
 最终文档/链接/入口和空白检查退出 0，HEAD 未改变。变更保留在 dev 工作区，
 没有提交、推送或清理宿主旧通知区。
+
+
+## 2026-09-11 独立进程 SHM 性能实验
+
+### 范围、环境与可追溯数据
+
+本轮替换旧单进程 benchmark，只比较**同一 VMware 虚拟机内、独立 exec 的收发进程、
+显式 POSIX SHM**。没有 INTRA、RTPS、真实跨主机测试；没有重跑全部中间件回归。
+采用“包含逐条数据准备、普通路径序列化/反序列化、接收全内容校验”的端到端吞吐口径，
+没有纯传输或延迟测量。旧 benchmark 数据不与本次合并。
+
+- 工作目录 `/home/jim/cpp/CyberRT`，分支 `dev`，基线 HEAD
+  `9925d8705a933dc289240b3411c420bb07a698b3`；代码为本轮未提交修改。
+- Ubuntu 22.04 环境，g++ `11.4.0-1ubuntu1~22.04.3`，Fast DDS 路径
+  `/home/jim/cpp/fastdds_2.12/install`，优化参数 `-O2 -DNDEBUG`，C++14、`-faligned-new`。
+  `SANITIZE` 未设置，未运行 sanitizer；ASAN/UBSAN/TSAN_OPTIONS、LD_LIBRARY_PATH 均未设置。
+- VMware 完全虚拟化，4 个 vCPU，型号字符串 Intel Core i9-11900H @ 2.50GHz，
+  1 NUMA 节点，约 3.8 GiB RAM；`/dev/shm` 约 1.9 GiB、实验前可用约 1.9 GiB。
+  初始 load average 为 0.15/0.24/0.17；未控制宿主调度、频率或其他 VM 负载。
+- 正式发送进程固定 CPU 0，接收进程（含 dispatcher）固定 CPU 1。每组预热 1000 ms、
+  正式 5000 ms、排空 1000 ms；每路径每档三次，第二次交换模式先后顺序。
+- 全部使用 32 槽、每槽 8 MiB，实际映射大小 268,506,112 bytes；业务 Payload
+  4096/65536/1048576/4194304 bytes，普通序列化后各增加 7 bytes。
+  四档都实际通过，没有超限档；不声明其他大小支持。该固定夹具不改变库默认配置。
+- 正式执行时间 2026-09-11 17:10:32–17:13:29 +08:00。
+
+[正式原始 manifest](../log/shm-benchmark-20260911/formal/manifest.json) 保留 24 次运行的
+完整子进程命令、PID、环境、二进制/源码 SHA256、路径证据、退出状态和原始计数；
+[逐轮 CSV](../log/shm-benchmark-20260911/formal/results.csv) 和
+[汇总 JSON](../log/shm-benchmark-20260911/formal/summary.json) 可复算。
+日志目录为 `log/shm-benchmark-20260911/`，运行指南和严格口径以
+[TESTING](TESTING.md#性能程序) 为主。
+
+### 实际构建、失败与修复记录
+
+以下命令均已执行，工作目录与环境定义如下；没有用后来的成功覆盖首次失败。
+
+```sh
+cd /home/jim/cpp/CyberRT
+mkdir -p log/shm-benchmark-20260911
+make -C example -j2 BUILD_DIR=/home/jim/cpp/CyberRT/example/build-benchmark OPTFLAGS='-O2 -DNDEBUG' shm_benchmark_sender shm_benchmark_receiver > log/shm-benchmark-20260911/build.log 2>&1
+make -C example -j2 BUILD_DIR=/home/jim/cpp/CyberRT/example/build-benchmark OPTFLAGS='-O2 -DNDEBUG' shm_benchmark_sender shm_benchmark_receiver > log/shm-benchmark-20260911/build-retry.log 2>&1
+make -C example -j2 BUILD_DIR=/home/jim/cpp/CyberRT/example/build-benchmark OPTFLAGS='-O2 -DNDEBUG' shm_benchmark_sender shm_benchmark_receiver > log/shm-benchmark-20260911/build-fixed.log 2>&1
+python3 -m py_compile example/run_shm_benchmark.py 
+```
+
+前三次构建退出分别为 2、2、0：第一次发现 `ShmConf`/`State` 命名空间歧义，第二次
+仍有 `State` 歧义，补全 `transport::` 限定后成功。Python 语法检查退出 0。
+生成的本轮 `__pycache__` 最后清除；优化对象与默认 build 隔离。
+
+```sh
+python3 example/run_shm_benchmark.py --output-dir log/shm-benchmark-20260911/smoke --sizes 4096 4194304 --warmup-ms 200 --duration-ms 300 --drain-ms 200 --sender-cpu 0 --receiver-cpu 1 > log/shm-benchmark-20260911/smoke-run.log 2>&1
+unshare --user --map-root-user --ipc ipcs -m
+ipcs -m
+unshare --user --map-root-user --ipc python3 example/run_shm_benchmark.py --output-dir log/shm-benchmark-20260911/smoke-isolated --sizes 4096 4194304 --warmup-ms 200 --duration-ms 300 --drain-ms 200 --sender-cpu 0 --receiver-cpu 1 > log/shm-benchmark-20260911/smoke-isolated-run.log 2>&1
+```
+
+首个 smoke 退出 1，两子进程均退出 1，未进入正式窗口：宿主 key `0x31c7e6c9`、
+shmid `19`、196616 bytes 的旧通知区与当前布局不兼容，接收 PROBE 超时。
+这是环境阻止测量，不是性能数据。失败详情保存在
+[失败 manifest](../log/shm-benchmark-20260911/smoke/manifest.json)。
+两个 `ipcs` 命令退出 0，确认新 IPC 命名空间为空而宿主旧段仍在。
+随后隔离 smoke 退出 0，12 次（两档 × 两模式 × 三次）均通过，
+[短测 manifest](../log/shm-benchmark-20260911/smoke-isolated/manifest.json) 保留实际结果。
+短测使用修复 Payload 高位校验前的版本和 300 ms 窗口，不混入正式汇总。
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 example/test_shm_benchmark_stats.py > log/shm-benchmark-20260911/stats-tests.log 2>&1
+make -C example -j2 BUILD_DIR=/home/jim/cpp/CyberRT/example/build-benchmark OPTFLAGS='-O2 -DNDEBUG' shm_benchmark_sender shm_benchmark_receiver > log/shm-benchmark-20260911/build-selftest.log 2>&1
+./example/build-benchmark/bin/shm_benchmark_receiver --self-test > log/shm-benchmark-20260911/selftest-initial.log 2>&1
+make -C example -j2 BUILD_DIR=/home/jim/cpp/CyberRT/example/build-benchmark OPTFLAGS='-O2 -DNDEBUG' shm_benchmark_sender shm_benchmark_receiver > log/shm-benchmark-20260911/build-final.log 2>&1
+./example/build-benchmark/bin/shm_benchmark_receiver --self-test > log/shm-benchmark-20260911/selftest-fixed.log 2>&1
+PYTHONDONTWRITEBYTECODE=1 python3 example/test_shm_benchmark_stats.py > log/shm-benchmark-20260911/stats-tests-final.log 2>&1
+```
+
+Python 初次 4 项测试通过（退出 0）；含自检的构建退出 0。
+C++ 首次自检退出 1：`payload corruption escaped full validation`，定位为生成公式
+只利用序号低字节，修改序号高位仍可能被接受。修复为序号所有字节参与 Payload seed，
+补充异常退出时的 sampler join 和 dispatcher shutdown 后，最终构建退出 0，
+C++ 自检退出 0（内容每字节损坏、阶段隔离、窗口边界、重复/越界），Python 4 项复验退出 0。
+
+### 正式命令和结果
+
+```sh
+cd /home/jim/cpp/CyberRT
+PYTHONDONTWRITEBYTECODE=1 unshare --user --map-root-user --ipc python3 example/run_shm_benchmark.py --output-dir log/shm-benchmark-20260911/formal --sizes 4096 65536 1048576 4194304 --warmup-ms 1000 --duration-ms 5000 --drain-ms 1000 --repeats 3 --sender-cpu 0 --receiver-cpu 1 > log/shm-benchmark-20260911/formal-run.log 2>&1
+```
+
+runner 退出 0，24 对收发进程共 48 个进程全部退出 0。默认 `--bin-dir` 实际解析为
+`/home/jim/cpp/CyberRT/example/build-benchmark/bin`；runner 为每个子进程明确设置
+`CMW_PATH=/home/jim/cpp/CyberRT`，其他相关环境见 manifest。没有过滤条件，完整四档矩阵。
+
+以下每格为三次的**中位数 [最小值, 最大值]**。MiB/s 只用正式窗口内完成全内容校验
+且去重后的接收字节；排空不计吞吐。CPU% 为进程 CPU 时间/实际采样墙钟，100% 为
+占满一个逻辑核；两进程分别计量。缺失率为排空后缺失的成功发送数/发送成功数。
+
+| Payload | Path | MiB/s median [min, max] | Sender CPU % | Receiver CPU % | Missing success % |
+| --- | --- | --- | --- | --- | --- |
+| 4096 | copy | 765.74 [748.62, 801.41] | 99.87 [99.84, 99.96] | 52.86 [51.67, 54.81] | 46.84 [46.80, 49.92] |
+| 4096 | loan | 2072.84 [1912.01, 2176.97] | 99.85 [99.65, 99.92] | 97.62 [95.98, 98.09] | 17.71 [13.08, 21.06] |
+| 65536 | copy | 2197.96 [2149.07, 2201.41] | 99.94 [99.87, 99.95] | 87.86 [87.30, 88.90] | 2.06 [1.88, 3.47] |
+| 65536 | loan | 2994.59 [2397.34, 3035.75] | 99.94 [99.68, 99.97] | 86.03 [84.81, 87.27] | 1.97 [1.59, 3.50] |
+| 1048576 | copy | 1890.00 [1764.20, 1995.00] | 99.86 [99.29, 99.93] | 83.85 [82.25, 90.65] | 0.00 [0.00, 0.55] |
+| 1048576 | loan | 2745.00 [2686.40, 2750.00] | 99.96 [99.91, 99.97] | 90.08 [89.72, 91.93] | 0.12 [0.00, 0.55] |
+| 4194304 | copy | 1586.40 [1359.20, 1587.20] | 99.90 [99.88, 99.90] | 81.45 [78.79, 95.28] | 0.00 [0.00, 2.59] |
+| 4194304 | loan | 2804.00 [2801.60, 2836.80] | 99.94 [99.93, 99.97] | 86.92 [86.74, 89.30] | 0.00 [0.00, 0.00] |
+
+上述都是过载持续发送结果。4 KiB 普通 SHM 的成功发送缺失率中位数 46.84%，
+Loan 为 17.71%；不能用发送成功数代替接收吞吐。64 KiB Loan 的有效吞吐范围
+2397.34–3035.75 MiB/s，波动明显；没有删除低值轮次。4 MiB 普通路径第一轮
+存在 46 条缺失，后两轮为零，也全部保留。三次范围不等于统计置信区间。
+
+逐轮计数如下。所有轮次 `acquire_fail=0`、`transmit_fail=0`，所以尝试数等于发送成功数；
+不代表接收端无丢弃。重复、内容错误、正式开始前消息、正式阶段迟到预热、
+截止后回调和“失败发送却收到”均为 0。没有从缺失数字推测具体丢弃原因。
+
+| Payload bytes | 路径/轮次 | 发送尝试=成功 | 窗口有效接收 | 排空有效接收 | 排空后成功发送缺失 |
+| --- | --- | --- | --- | --- | --- |
+| 4096 | copy/1 | 1929765 | 1025802 | 21 | 903942 |
+| 4096 | loan/1 | 3100362 | 2447371 | 31 | 652960 |
+| 4096 | loan/2 | 3206007 | 2786526 | 10 | 419471 |
+| 4096 | copy/2 | 1956979 | 980146 | 6 | 976827 |
+| 4096 | copy/3 | 1801106 | 958230 | 32 | 842844 |
+| 4096 | loan/3 | 3224124 | 2653237 | 17 | 570870 |
+| 65536 | copy/1 | 178105 | 171926 | 4 | 6175 |
+| 65536 | loan/1 | 244395 | 239567 | 17 | 4811 |
+| 65536 | loan/2 | 198750 | 191787 | 12 | 6951 |
+| 65536 | copy/2 | 179837 | 176113 | 11 | 3713 |
+| 65536 | copy/3 | 179240 | 175837 | 27 | 3376 |
+| 65536 | loan/3 | 246807 | 242860 | 14 | 3933 |
+| 1048576 | copy/1 | 9452 | 9450 | 2 | 0 |
+| 1048576 | loan/1 | 13782 | 13750 | 15 | 17 |
+| 1048576 | loan/2 | 13728 | 13725 | 3 | 0 |
+| 1048576 | copy/2 | 9977 | 9975 | 2 | 0 |
+| 1048576 | copy/3 | 8888 | 8821 | 18 | 49 |
+| 1048576 | loan/3 | 13508 | 13432 | 2 | 74 |
+| 4194304 | copy/1 | 1774 | 1699 | 29 | 46 |
+| 4194304 | loan/1 | 3547 | 3546 | 1 | 0 |
+| 4194304 | loan/2 | 3504 | 3502 | 2 | 0 |
+| 4194304 | copy/2 | 1985 | 1983 | 2 | 0 |
+| 4194304 | copy/3 | 1985 | 1984 | 1 | 0 |
+| 4194304 | loan/3 | 3507 | 3505 | 2 | 0 |
+
+原始 CSV 同时保存各轮有效字节、warmup 排除计数和纳秒边界；正式窗口全部精确为
+5,000,000,000 ns。CPU 实际采样墙钟范围为 4.995815813–5.004705574 s，
+最大边界迟到 5.074875 ms，均低于 20 ms 拒绝阈值。末条跨 end 完成单列报告，
+其窗口后收到的字节只计排空，窗口外 CPU 不计正式 CPU。
+
+每轮实际 POSIX 映射和消息类型均验证通过：copy 为 SERIALIZED 且正式序列化次数
+等于尝试数；Loan 的每个正式借出/接收回调均验证为 SHM-backed。所有 PID 配对不同，
+所有槽位/容量一致，内容、阶段与成功 bitmap 对账均通过。24 次退出后均未遗留本轮
+POSIX 段（runner 未执行兜底 unlink），socket 已清理。隔离命名空间中的当前通知区
+为 229432 bytes、连接数 0，随命名空间退出销毁；没有删除宿主旧通知区。
+
+
+### 结果复算、文档和构建入口审计
+
+下面是实际执行的审计脚本完整内容。它重新检查 24 轮的计数与 CSV，重新计算
+中位数/范围，核对实际二进制及基准源码 SHA256，并检查本地链接、标题锚点、
+测试源码/Makefile 入口及空白；没有重跑中间件测试。
+
+```sh
+cd /home/jim/cpp/CyberRT
+cat > /tmp/cyberrt-benchmark-audit.py <<'PY'
+import csv
+import hashlib
+import json
+import pathlib
+import re
+import subprocess
+import sys
+root = pathlib.Path('/home/jim/cpp/CyberRT')
+sys.path.insert(0, str(root / 'example'))
+from run_shm_benchmark import validate, metrics, summarize
+base = root / 'log/shm-benchmark-20260911/formal'
+manifest = json.loads((base / 'manifest.json').read_text())
+rows = list(csv.DictReader((base / 'results.csv').open()))
+assert len(rows) == len(manifest['runs']) == 24
+for run, row in zip(manifest['runs'], rows):
+    s, r = run['sender'], run['receiver']
+    validate(s, r)
+    assert run['exit_codes'] == {'sender': 0, 'receiver': 0}
+    assert not run['segment_left_after_exit']
+    assert not pathlib.Path(run['segment_path']).exists()
+    for key, value in metrics(s, r).items():
+        assert float(row[key]) == value, (run['tag'], key)
+    for prefix, endpoint in [('send_', s), ('recv_', r)]:
+        for key, value in endpoint.items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                assert int(row[prefix + key]) == value
+for name, digest in manifest['sha256'].items():
+    assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() == digest, name
+reviewed = [{'size_bytes': int(row['size_bytes']), 'mode': row['mode'],
+             **{k: float(row[k]) for k in metrics(manifest['runs'][0]['sender'], manifest['runs'][0]['receiver'])}}
+            for row in rows]
+assert summarize(reviewed) == json.loads((base / 'summary.json').read_text())
+print('PASS 24 trial accounting, CSV, median/range, SHA256 and POSIX cleanup')
+for name in ['README.md', 'example/TESTING.md', 'example/testlog.md']:
+    source = root / name
+    for target in re.findall(r'\[[^\]]*\]\(([^)]+)\)', source.read_text()):
+        if '://' in target:
+            continue
+        filename, sep, anchor = target.partition('#')
+        dest = (source.parent / filename).resolve() if filename else source
+        assert dest.exists(), (name, target)
+        if sep:
+            anchors = {re.sub(r'[^\w\-\s]', '', title.lower()).replace(' ', '-')
+                       for title in re.findall(r'^#+\s+(.+)$', dest.read_text(), re.M)}
+            assert anchor in anchors, (name, target)
+makefile = (root / 'example/Makefile').read_text()
+for target in ['shm_segment_benchmark', 'shm_benchmark_sender', 'shm_benchmark_receiver']:
+    assert target in makefile and (root / 'example' / (target + '.cpp')).exists()
+assert 'shm_zero_copy_benchmark' not in makefile
+for target in set(re.findall(r'\btest_[a-z0-9_]+\b', (root / 'example/TESTING.md').read_text())):
+    cpp = root / 'example' / (target + '.cpp')
+    assert cpp.exists() or (root / 'example' / (target + '.py')).exists(), target
+    if cpp.exists():
+        assert target in makefile, target
+for path in list((root / 'example').glob('shm_benchmark_*')) + [root / 'example/run_shm_benchmark.py', root / 'example/test_shm_benchmark_stats.py']:
+    for line in path.read_text().splitlines():
+        assert line == line.rstrip(), path
+subprocess.run(['git', 'diff', '--check'], cwd=root, check=True)
+print('PASS local Markdown links/anchors, test/build targets and whitespace')
+PY
+PYTHONDONTWRITEBYTECODE=1 python3 /tmp/cyberrt-benchmark-audit.py > log/shm-benchmark-20260911/audit-initial.log 2>&1
+make -C example -n BUILD_DIR=/home/jim/cpp/CyberRT/example/build-benchmark OPTFLAGS='-O2 -DNDEBUG' benchmarks > log/shm-benchmark-20260911/targets-dry-run.log 2>&1
+ipcs -m > log/shm-benchmark-20260911/ipc-final.log
+```
+
+结果复算/哈希/清理以及文档/入口/空白审计均 PASS；`make -n` 与 `ipcs` 退出 0。
+`make -n benchmarks` 仅验证构建入口解析，未实际构建或运行 `shm_segment_benchmark`。
+宿主仍只有原 key `0x31c7e6c9`、shmid `19`、196616 bytes、连接数 0 的旧通知区。
+此前也已单独执行 `git diff --check`（退出 0），并用下面命令检查仓库内 `log/`
+以外的 `.log`/轮转文件，输出为空（不是运行程序测试）：
+
+```sh
+rg --files --hidden -g '*.log' -g '*.log.*' -g '!log/**' -g '!.git/**' --no-ignore | head -20
+```
+
+补齐最终执行记录后，实际复查命令如下：
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 /tmp/cyberrt-benchmark-audit.py > log/shm-benchmark-20260911/audit-final.log 2>&1
+git diff --check
+git status --short
+```
+
+最终复算、哈希、链接、入口和空白检查退出 0。结果保留在工作区，未提交、推送；
+原失败、短测和正式结果分别归档，没有替换失败记录或抽掉低吞吐轮次。

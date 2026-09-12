@@ -218,19 +218,131 @@ SANITIZE 开关只对本项目的编译与链接生效，不会重编译外部 F
 
 ## 性能程序
 
-- `shm_segment_benchmark`：以相同跨进程 Block 读写路径比较 POSIX/XSI 的稳态延迟与吞吐。
-- `shm_zero_copy_benchmark`：比较 INTRA、SHM 复制、SHM Loan 和强制 RTPS 的性能，`--quick` 用于缩短运行。输出到终端和当前目录下的 `build/shm_zero_copy_benchmark.csv`。
+`shm_segment_benchmark` 保留 POSIX/XSI Block 读写比较。旧的单进程
+`shm_zero_copy_benchmark` 已删除，由 `shm_benchmark_sender` 与
+`shm_benchmark_receiver` 取代；旧数据不应与新吞吐/CPU 口径合并。
+`make benchmarks` 只构建性能程序；它们不属于 `check` 的自动回归。
 
-从仓库根目录进入 example 后执行示例，使用默认 build 目录以匹配 CSV 输出路径：
+### 构建和运行
+
+依赖 Linux 的 POSIX SHM、System V 通知区、Unix socket、`/proc`、Python 3.8+、
+Fast DDS（仅构建链接依赖，不使用 DDS 数据路径），绑核示例还需 `taskset`。
+以下是可复用示例，实际执行记录见 [testlog](testlog.md#2026-09-11-独立进程-shm-性能实验)。
+必须用独立优化构建目录，避免混用默认未优化或 sanitizer 对象；改变 OPTFLAGS
+时使用新 BUILD_DIR 或先清理对应构建目录，Make 不会仅因变量值变化重编译对象。
 
 ```sh
-cd example
-make -j2 benchmarks
-CMW_PATH="$(cd .. && pwd)" ./build/bin/shm_segment_benchmark
-CMW_PATH="$(cd .. && pwd)" ./build/bin/shm_zero_copy_benchmark --quick
+cd /home/jim/cpp/CyberRT
+BUILD_DIR="$PWD/example/build-benchmark"
+make -C example -j2 BUILD_DIR="$BUILD_DIR" OPTFLAGS='-O2 -DNDEBUG' shm_benchmark_sender shm_benchmark_receiver
+"$BUILD_DIR/bin/shm_benchmark_receiver" --self-test
+PYTHONDONTWRITEBYTECODE=1 python3 example/test_shm_benchmark_stats.py
+RUN_DIR="$PWD/log/shm-benchmark-$(date +%Y%m%d-%H%M%S)"
+CMW_PATH="$PWD" PYTHONDONTWRITEBYTECODE=1 unshare --user --map-root-user --ipc \
+  python3 example/run_shm_benchmark.py --bin-dir "$BUILD_DIR/bin" --output-dir "$RUN_DIR" \
+  --sizes 4096 65536 1048576 4194304 --warmup-ms 1000 --duration-ms 5000 \
+  --drain-ms 1000 --repeats 3 --sender-cpu 0 --receiver-cpu 1
 ```
 
-性能程序不属于 check 的通过/失败回归；实测参数、命令、输出及结果统一记录到 testlog。
+`unshare` 让所有收发进程共享一个新的 IPC 命名空间，隔离旧版 System V 通知区；
+它不改变 POSIX 数据路径，也不隔离 CPU、内存或其他 VM 负载。宿主环境已干净时
+可去掉 `unshare`。若系统禁止用户命名空间，应使用管理员提供的兼容 IPC 环境，
+不得自动删除其他程序的通知区。CPU 编号按本机允许的 affinity 选择；省略两个
+`--*-cpu` 参数则不绑核，必须在解释结果时说明。
+
+runner 串行执行四档 × 两种模式 × 三次，第二次交换 copy/loan 顺序，避免所有
+copy 都先测。短测可选 `--sizes 4096 4194304 --warmup-ms 200 --duration-ms 300
+--drain-ms 200`，仍重复三次，不能冒充正式五秒测量。输出目录必须是 `log/`
+下的新目录，已有目录会被拒绝，以免覆盖历史结果。
+
+两个二进制也可分别从两个终端启动；双方参数必须完全一致，仅 `--output` 不同：
+
+```sh
+# 终端 1；需要干净且与终端 2 相同的 IPC 命名空间。
+cd /home/jim/cpp/CyberRT
+CMW_PATH="$PWD" ./example/build-benchmark/bin/shm_benchmark_receiver \
+  --mode loan --size 4096 --channel manual_shm_bench_1 \
+  --control "$PWD/log/manual_shm_bench_1.sock" --output "$PWD/log/manual_shm_bench_1-receiver.json" \
+  --warmup-ms 1000 --duration-ms 5000 --drain-ms 1000
+# 终端 2，在终端 1 启动后的 10 秒内执行。
+cd /home/jim/cpp/CyberRT
+CMW_PATH="$PWD" ./example/build-benchmark/bin/shm_benchmark_sender \
+  --mode loan --size 4096 --channel manual_shm_bench_1 \
+  --control "$PWD/log/manual_shm_bench_1.sock" --output "$PWD/log/manual_shm_bench_1-sender.json" \
+  --warmup-ms 1000 --duration-ms 5000 --drain-ms 1000
+```
+
+手动测试须为每次运行选择新 channel、socket、结果文件名。`--mode` 为 `copy|loan`；
+`--size` 只接受上述四档，非法参数以非零退出。预热/正式时长范围为 100–60000 ms，
+排空为 100–10000 ms。32 个槽位、8 MiB 槽容量固定不可调，实际 Segment 为
+`ShmConf(8 MiB).managed_shm_size()`（约 256 MiB）；需要足够的 `/dev/shm` 和内存。
+序号统计最多支持 16,777,216 次正式尝试，达到上限的结果无效。当前库最大 SHM
+消息为 32 MiB，本基准只声明四档支持；不外推更大 Payload。
+
+### 阶段和测量口径
+
+1. **连接就绪**：Unix socket 校验参数和不同 PID；目标 SHM 路径收到并完整校验
+   PROBE 后才就绪。检查 `/proc/self/maps`、POSIX 段大小、`State` 消息类型和容量。
+   Loan 每次借出和每次回调还校验 SHM-backed、channel、block、generation，接收只读。
+   copy 统计实际序列化/反序列化调用，不能仅凭命令行模式认定走了 SHM。
+2. **预热**：持续发送独立 WARMUP 阶段，随后停止并发送 BARRIER；接收线程处理
+   完 barrier 才确认，正式开始前再留 300 ms。迟到的预热消息不计正式结果，
+   如果预热在正式开始后仍被处理，则整组结果无效。预热的墙钟、数量、CPU 全部排除。
+3. **正式测量**：两进程共享 Linux `CLOCK_MONOTONIC` 的绝对 `[start,end)`，
+   连续发送，不等待逐条确认。序号对应发送尝试，包含失败尝试；正式循环开始时
+   在窗口内的尝试都记录，最后一条可能在 end 后完成，另记 `completion_after_end`。
+   `send_success` 是 API 返回 true 的次数；`acquire_fail` 是 Loan 获取失败，
+   `transmit_fail` 是发送 API 返回 false，保留已有失败/丢弃策略，不重试同一序号。
+   普通路径的失败返回不能再细分为槽位、序列化或通知失败，不能全部声称资源耗尽。
+4. **停止并排空**：发送端报出实际停止时间和成功序号 bitmap，并保持 Segment 存活。
+   排空截止为 `max(end, sender_stop)+drain_ms`；到期停止接收并 join 回调线程。
+   截止后才完成的回调另记 `after_cutoff`，不计有效接收或缺失恢复。排空到期不代表
+   可靠队列承诺已送达全部消息；未收到的成功发送仍明确计入缺失。
+
+有效接收按**完成全内容校验的时刻**归窗，再按序号去重。`window_valid_bytes =
+window_unique × size_bytes`，吞吐为它除以统一正式时长，以 MiB/s（2^20 bytes）表示。
+`size_bytes` 包含 24-byte magic/阶段/序号头，业务有效数据长度相同；普通路径额外
+包含 `DataStream` 编码头（实际 `serialized_size` 单列），不计入有效字节。两条路径
+均每条生成内容；普通 string 的分配/初始化、序列化与反序列化成本保留，Loan 在
+借出 buffer 直接填充。接收端统一逐字节校验，不用三点抽样。没有预生成正式内容。
+
+`drain_unique` 不进入吞吐分子；`duplicates_window`、`duplicates_drain` 分开报告。
+最终缺失以成功序号 bitmap 对接收 bitmap 求差集，`missing_success_after_drain`
+不包含 API 已报告失败的尝试。另列 `missing_attempts_after_drain` 与
+`received_failed_send`（API 返回 false 但接收端仍收到），不假定失败返回保证未投递。
+接收丢弃可来自旧代次通知、读锁失败、通知覆盖等，当前 API 不提供原因计数，
+不能把缺失都归咎于某一种耗尽原因。单纯成功发送数不能用来计算有效吞吐。
+
+CPU 使用 `CLOCK_PROCESS_CPUTIME_ID`，包含各进程所有线程的用户态和内核态 CPU。
+在相同绝对边界采样，发送端另有一个休眠采样线程；记录实际采样时间与 CPU 差值。
+`CPU% = CPU 时间 / 实际采样墙钟时间 × 100`，**100% 代表占满一个逻辑核**。
+采样边界可能受调度影响，任一边界延迟超过 20 ms，runner 拒绝该组；原始纳秒
+时间可审计这一误差，不能理解为完全无误差的瞬时采样。停止后的尾条与排空不计
+正式 CPU，正式 end 之后的接收也不计吞吐。
+
+本版本仅提供“数据准备 + 传输 + 接收全内容校验”的吞吐实验，没有纯传输模式，
+没有逐条等待的延迟模式，也不输出单程或往返延迟。日志设为 ERROR、关闭 console，
+保留库自身日志构造开销；不是移除日志后的理论极限。单机 VM 结果不代表跨主机。
+
+### 输出、校验和清理
+
+- `manifest.json` 保存环境、HEAD、二进制/基准源码 SHA256、每次运行的完整收发
+  命令、PID、退出码、原始结果和验证状态；短测/失败也保留独立目录。
+- `results.csv` 保存每轮计数、有效字节、吞吐、CPU 和边界纳秒时间；`summary.json`
+  与 `summary.md` 报告各组三次的中位数及 `[min,max]`，不把范围当作置信区间。
+- 任一子进程失败、超时、内容/阶段污染、路径/计数不一致或 CPU 边界延迟超限，
+  runner 非零退出且不生成整套成功汇总；丢失和重复如实统计，不伪造零值。
+- 连接及探针分别最多 10 秒，控制 socket 读写最多 90 秒；runner 对每对进程
+  设置 `warmup + duration + drain + 35 秒` 总上限，先 terminate，3 秒后仍未退出则 kill。
+- 正常退出由 Lease/Segment 引用计数回收本轮 POSIX 段；runner 在两进程退出后
+  仅检查并清理 sender 输出的本轮确切段名及 socket，记录是否有遗留，不清理其他段。
+  手动运行异常退出时，依据 sender 的 `segment_path` 输出确认无人使用后清理该段。
+  System V 通知区随隔离 IPC 命名空间销毁，宿主旧通知区保持原样。
+- 运行与构建 `.log` 均在根目录 `log/`；runner 将本轮 Logger 日志归档到输出目录。
+  `make clean` 保留日志，但删除其指定 BUILD_DIR。`__pycache__` 可通过上述环境变量避免。
+- `receiver --self-test` 不启动中间件，覆盖全内容损坏、阶段隔离、窗口边界、重复与
+  序号越界；`test_shm_benchmark_stats.py` 用合成数据验证排空不计吞吐、CPU 公式、
+  缺失公式、中位数/范围，并确认伪路径和污染结果会被拒绝。真实跨进程路径由矩阵验证。
 
 
 ## 日志路径回归与输出保存

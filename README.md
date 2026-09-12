@@ -34,6 +34,22 @@ MINI_CyberRT 是针对原始 cmw 项目进行的二次开发，在保留原有 C
 - SHM Transmitter 的 Enable、Disable、Acquire 与发送路径使用同一生命周期锁；关闭会等待已进入发送临界区的操作完成，关闭后新的 Acquire/发送安全失败。
 - SHM-backed Loan 记录发送端的启用周期；Disable 后或 Disable→Enable 后提交旧 Loan 会被拒绝，重新获取的 Loan 可正常发送。Heap-backed Loan 不受旧 SHM 周期限制。
 
+### SHM 性能比较边界
+
+`shm_benchmark_sender` 与 `shm_benchmark_receiver` 是两个独立进程，直接实例化
+`ShmTransmitter`/`ShmReceiver`，比较普通序列化 SHM 与 SHM-backed Loan。
+连接探针、实际 POSIX 段的类型/容量/进程映射及 Loan Lease 属性共同验证目标路径，
+不经过 Hybrid 自动选路。测试夹具预建固定的 32 槽位、每槽 8 MiB Segment，
+四档业务 Payload 为 4 KiB、64 KiB、1 MiB、4 MiB；不会改变中间件的默认槽位策略。
+
+当前比较包含每条消息的数据准备：普通路径分配业务 buffer、生成内容、经过
+`DataStream` 序列化和 SHM 复制，接收端反序列化；Loan 直接在借出的 SHM
+buffer 中生成相同内容，接收端读取只读 Lease。两条路径的接收端执行相同的逐字节校验和序号统计。
+这是持续过载下的端到端吞吐比较，不能解释为纯传输带宽、无损容量或延迟结果。
+预热、正式窗口与排空严格分账，发送成功不等于接收成功。
+[运行参数、统计口径和资源清理](example/TESTING.md#性能程序)；
+[实际三轮结果及环境限制](example/testlog.md#2026-09-11-独立进程-shm-性能实验)。
+
 ### API 正确性
 
 - `Publisher::Publish()` 现在会正确返回底层 `Transmit()` 结果，避免非 `void` 函数无返回值的未定义行为。

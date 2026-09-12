@@ -18,7 +18,8 @@ CPPFLAGS := -DCMW_PROJECT_ROOT='"$(PROJECT_ROOT)"' \
             -I$(FAST_DDS_INC_DIR)
 # C++14 otherwise uses unaligned new for cache-line-aligned runtime objects
 # (e.g. PerfEventCache's BoundedQueue). Keep the language version unchanged.
-CXXFLAGS := -std=c++14 -faligned-new -g -MMD -MP
+OPTFLAGS ?=
+CXXFLAGS := -std=c++14 -faligned-new -g -MMD -MP $(OPTFLAGS)
 LDFLAGS  := -L$(FAST_DDS_LIB_DIR) -Wl,-rpath,$(FAST_DDS_LIB_DIR)
 LDLIBS   := -Wl,--no-as-needed \
             -lfastrtps -lfastcdr -lfoonathan_memory-0.7.3 \
@@ -79,7 +80,8 @@ DEPENDENCY_OBJS = $(PUBLISHER_CORE_OBJS) $(SUBSCRIBER_CORE_OBJS) \
                    $(OBJ_DIR)/example/test_subscriber.o \
                    $(addprefix $(OBJ_DIR)/example/,$(addsuffix .o,$(ALL_TEST_TARGETS))) \
                    $(OBJ_DIR)/example/shm_segment_benchmark.o \
-                   $(OBJ_DIR)/example/shm_zero_copy_benchmark.o
+                   $(OBJ_DIR)/example/shm_benchmark_sender.o \
+                   $(OBJ_DIR)/example/shm_benchmark_receiver.o
 DEPENDENCY_FILES = $(DEPENDENCY_OBJS:.o=.d)
 
 # `tests` is deliberately build-only.  These are the binaries which have a
@@ -112,7 +114,7 @@ LEGACY_TEST_TARGETS := test_node_manager test_channel_manager test_croutine \
                        test_scheduler test_task test_class_loader
 ALL_TEST_TARGETS := $(FORMAL_TEST_TARGETS) $(DEMO_TEST_TARGETS) \
                     $(LEGACY_TEST_TARGETS)
-BENCHMARK_TARGETS := shm_segment_benchmark shm_zero_copy_benchmark
+BENCHMARK_TARGETS := shm_segment_benchmark shm_benchmark_sender shm_benchmark_receiver
 CLASS_LOADER_PLUGIN_DIR := $(PROJECT_ROOT)/class_loader/test
 CLASS_LOADER_PLUGINS := $(CLASS_LOADER_PLUGIN_DIR)/libplugin1.so \
                         $(CLASS_LOADER_PLUGIN_DIR)/libplugin2.so
@@ -212,7 +214,7 @@ $(BIN_DIR)/test_%: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/test_%.o Makefile | chec
 $(BIN_DIR)/shm_segment_benchmark: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/shm_segment_benchmark.o Makefile | check-fastdds $(BIN_DIR)
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
 
-$(BIN_DIR)/shm_zero_copy_benchmark: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/shm_zero_copy_benchmark.o Makefile | check-fastdds $(BIN_DIR)
+$(BIN_DIR)/shm_benchmark_%: $(PUBLISHER_CORE_OBJS) $(OBJ_DIR)/example/shm_benchmark_%.o Makefile | check-fastdds $(BIN_DIR)
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
 
 $(CLASS_LOADER_PLUGIN_DIR)/lib%.so: $(CLASS_LOADER_PLUGIN_DIR)/%.cc | $(CMW_INCLUDE_LINK)
