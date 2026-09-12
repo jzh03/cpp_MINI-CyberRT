@@ -16,10 +16,12 @@
 #include <cmw/init.h>
 #include <cmw/node/publisher.h>
 #include <cmw/node/subscriber.h>
+#include <cmw/scheduler/scheduler_factory.h>
 #include <cmw/serialize/serializable.h>
 
 namespace hnu {
 namespace cmw {
+
 namespace {
 
 // 验证真实 Publisher/Subscriber + Discovery + Hybrid + INTRA 完整链路。
@@ -179,6 +181,77 @@ TEST(HybridIntraTest, OneSubscriberLeaveDoesNotDisableAnotherIntraPeer) {
   publisher.Shutdown();
 }
 
+TEST(HybridIntraTest, SubscriberLeaveThenNewSubscriberJoins) {
+  const std::string channel_name = UniqueChannelName();
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::vector<HybridIntraMessage> subscriber_a_received;
+  std::vector<HybridIntraMessage> subscriber_b_received;
+  Publisher<HybridIntraMessage> publisher(
+      MakeRoleAttributes(channel_name, "_publisher"));
+
+  ASSERT_TRUE(publisher.Init());
+  {
+    Subscriber<HybridIntraMessage> subscriber_a(
+        MakeRoleAttributes(channel_name, "_subscriber_a"),
+        [&](const std::shared_ptr<HybridIntraMessage>& message) {
+          std::lock_guard<std::mutex> lock(mutex);
+          subscriber_a_received.push_back(*message);
+          condition.notify_one();
+        });
+    ASSERT_TRUE(subscriber_a.Init());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    HybridIntraMessage first_message;
+    first_message.sequence = 1;
+    first_message.payload = "intra-a";
+    ASSERT_TRUE(publisher.Publish(first_message));
+    {
+      std::unique_lock<std::mutex> lock(mutex);
+      ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(5), [&]() {
+        return subscriber_a_received.size() == 1;
+      }));
+      EXPECT_EQ(1U, subscriber_a_received.front().sequence);
+      EXPECT_EQ("intra-a", subscriber_a_received.front().payload);
+    }
+    subscriber_a.Shutdown();
+  }
+
+  Subscriber<HybridIntraMessage> subscriber_b(
+      MakeRoleAttributes(channel_name, "_subscriber_b"),
+      [&](const std::shared_ptr<HybridIntraMessage>& message) {
+        std::lock_guard<std::mutex> lock(mutex);
+        subscriber_b_received.push_back(*message);
+        condition.notify_one();
+      });
+  ASSERT_TRUE(subscriber_b.Init());
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  HybridIntraMessage second_message;
+  second_message.sequence = 2;
+  second_message.payload = "intra-b";
+  ASSERT_TRUE(publisher.Publish(second_message));
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(5), [&]() {
+      return subscriber_b_received.size() == 1;
+    }));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    ASSERT_EQ(1U, subscriber_a_received.size());
+    ASSERT_EQ(1U, subscriber_b_received.size());
+    EXPECT_EQ(1U, subscriber_a_received.front().sequence);
+    EXPECT_EQ("intra-a", subscriber_a_received.front().payload);
+    EXPECT_EQ(2U, subscriber_b_received.front().sequence);
+    EXPECT_EQ("intra-b", subscriber_b_received.front().payload);
+  }
+
+  subscriber_b.Shutdown();
+  publisher.Shutdown();
+}
+
 }  // namespace
 }  // namespace cmw
 }  // namespace hnu
@@ -186,5 +259,7 @@ TEST(HybridIntraTest, OneSubscriberLeaveDoesNotDisableAnotherIntraPeer) {
 int main(int argc, char** argv) {
   hnu::cmw::Init("HybridIntraTest");
   testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
+  const int result = RUN_ALL_TESTS();
+  hnu::cmw::scheduler::Instance()->Shutdown();
+  return result;
 }

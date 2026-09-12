@@ -9,15 +9,16 @@ namespace transport{
 
 using hnu::cmw::common::GlobalData;
 
-auto SegmentFactory::CreateSegment(uint64_t channel_id) -> SegmentPtr{
+auto SegmentFactory::CreateSegment(uint64_t channel_id,
+                                   uint64_t initial_msg_size) -> SegmentPtr{
     std::string segment_type(PosixSegment::Type());
 
 
     ADEBUG << "segment type: " << segment_type;
     if(segment_type == PosixSegment::Type()){
-        return std::make_shared<PosixSegment>(channel_id);
+        return std::make_shared<PosixSegment>(channel_id, initial_msg_size);
     }
-    return std::make_shared<XsiSegment>(channel_id);
+    return std::make_shared<XsiSegment>(channel_id, initial_msg_size);
 }
 
 

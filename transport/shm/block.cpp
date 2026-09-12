@@ -70,6 +70,10 @@ void Block::ReleaseReadLock() { lock_num_.fetch_sub(1); }
 //释放写锁,将lock_num_+1
 void Block::ReleaseWriteLock() { lock_num_.fetch_add(1); }
 
+void Block::IncreaseGeneration() {
+    generation_.fetch_add(1, std::memory_order_relaxed);
+}
+
 
 }
 }

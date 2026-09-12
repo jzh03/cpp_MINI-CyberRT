@@ -2,7 +2,7 @@
 #include <cmw/config/RoleAttributes.h>
 #include <cmw/transport/transport.h>
 #include <cmw/transport/message/message_info.h>
-
+#include <cmw/config/topology_change.h>
 void TEST_GLOBAL_DATA()
 {
     using namespace hnu::cmw::common;
@@ -49,7 +49,6 @@ void TEST_MUTILISTENER()
 }
 
 
-#include <cmw/config/topology_change.h>
 #include <cmw/time/time.h>
 void TEST_ChangeMsg()
 {

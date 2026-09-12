@@ -2,6 +2,7 @@
 #define CMW_TRANSPORT_SHM_BLOCK_H_
 
 
+#include <type_traits>
 #include <atomic>
 #include <cstdint>
 
@@ -15,13 +16,16 @@ class Block
     friend class Segment;
 public:
     Block();
-    virtual ~Block();
+    ~Block();
 
     uint64_t msg_size() const { return msg_size_; }
     void set_msg_size(uint64_t msg_size) { msg_size_ = msg_size;}
     uint64_t msg_info_size() const { return msg_info_size_; }
     void set_msg_info_size(uint64_t msg_info_size) {
         msg_info_size_ = msg_info_size;
+    }
+    uint64_t generation() const {
+        return generation_.load(std::memory_order_relaxed);
     }
 
     static const int32_t kRWLockFree;
@@ -33,11 +37,16 @@ private:
     bool TryLockForRead();
     void ReleaseWriteLock();
     void ReleaseReadLock();
+    void IncreaseGeneration();
 
     std::atomic<int32_t> lock_num_ = {0};
+    std::atomic<uint64_t> generation_ = {0};
     uint64_t msg_size_;
     uint64_t msg_info_size_;
 };
+
+static_assert(!std::is_polymorphic<Block>::value,
+              "Shared memory objects must not contain a vptr.");
 
 
 

@@ -12,14 +12,33 @@ BIN_DIR           := $(BUILD_DIR)/bin
 COMPAT_INC_DIR    := $(BUILD_DIR)/include
 CMW_INCLUDE_LINK  := $(COMPAT_INC_DIR)/cmw
 
-CPPFLAGS := -I$(COMPAT_INC_DIR) \
+CPPFLAGS := -DCMW_PROJECT_ROOT='"$(PROJECT_ROOT)"' \
+            -I$(COMPAT_INC_DIR) \
             -I$(PROJECT_ROOT)/thirdparty \
             -I$(FAST_DDS_INC_DIR)
-CXXFLAGS := -std=c++14 -g
+# C++14 otherwise uses unaligned new for cache-line-aligned runtime objects
+# (e.g. PerfEventCache's BoundedQueue). Keep the language version unchanged.
+OPTFLAGS ?=
+CXXFLAGS := -std=c++14 -faligned-new -g -MMD -MP $(OPTFLAGS)
 LDFLAGS  := -L$(FAST_DDS_LIB_DIR) -Wl,-rpath,$(FAST_DDS_LIB_DIR)
 LDLIBS   := -Wl,--no-as-needed \
             -lfastrtps -lfastcdr -lfoonathan_memory-0.7.3 \
             -Wl,--as-needed -lpthread -luuid -lrt -latomic -ldl
+
+# Use a separate BUILD_DIR for sanitizer objects and binaries.
+ifeq ($(SANITIZE),undefined)
+CXXFLAGS += -fsanitize=undefined,vptr -fno-sanitize-recover=all -fPIE
+LDFLAGS += -fsanitize=undefined,vptr -fno-sanitize-recover=all -pie
+endif
+
+ifeq ($(SANITIZE),address)
+CXXFLAGS += -fsanitize=address -fno-omit-frame-pointer -fno-pie
+LDFLAGS += -fsanitize=address -no-pie
+endif
+ifeq ($(SANITIZE),thread)
+CXXFLAGS += -fsanitize=thread -fno-omit-frame-pointer -fno-pie
+LDFLAGS += -fsanitize=thread -no-pie
+endif
 
 # Keep discovery inside explicit runtime directories. Tests, examples,
 # thirdparty sources, class-loader plugins and components are excluded.
@@ -56,23 +75,53 @@ TEST_CPP_RELS := $(patsubst $(PROJECT_ROOT)/%,%,$(TEST_ROOT_SRCS) $(TEST_CPP_SRC
 TEST_ASM_RELS := $(patsubst $(PROJECT_ROOT)/%,%,$(TEST_ASM_SRCS))
 TEST_CORE_OBJS := $(addprefix $(OBJ_DIR)/,$(TEST_CPP_RELS:.cpp=.o)) \
                   $(addprefix $(OBJ_DIR)/,$(TEST_ASM_RELS:.S=.o))
+DEPENDENCY_OBJS = $(PUBLISHER_CORE_OBJS) $(SUBSCRIBER_CORE_OBJS) \
+                   $(TEST_CORE_OBJS) $(OBJ_DIR)/example/test_publisher.o \
+                   $(OBJ_DIR)/example/test_subscriber.o \
+                   $(addprefix $(OBJ_DIR)/example/,$(addsuffix .o,$(ALL_TEST_TARGETS))) \
+                   $(OBJ_DIR)/example/shm_segment_benchmark.o \
+                   $(OBJ_DIR)/example/shm_benchmark_sender.o \
+                   $(OBJ_DIR)/example/shm_benchmark_receiver.o
+DEPENDENCY_FILES = $(DEPENDENCY_OBJS:.o=.d)
 
-TEST_TARGETS := test_writer test_reader test_serialize test_node_manager \
-                test_channel_manager test_topology_manager test_publisher \
-                test_subscriber test_log test_getenv test_croutine \
-                test_scheduler test_task test_blocker test_class_loader \
-                test_node test_publisher_subscriber \
-                test_shm_segment_robustness test_shm_dispatcher_robustness \
-                test_posix_segment_multiprocess \
-                test_shm_transmitter_receiver test_transport_mode_selection \
-                test_hybrid_intra test_hybrid_shm_multiprocess \
-                test_rtps_same_host_multiprocess test_hybrid_dynamic_intra \
-                test_hybrid_dynamic_shm_lifecycle \
-                test_rtps_lifecycle_regression
-BENCHMARK_TARGETS := shm_segment_benchmark
+# `tests` is deliberately build-only.  These are the binaries which have a
+# reliable pass/fail contract and are eligible for the check targets below.
+FAST_TEST_TARGETS := test_serialize test_blocker test_node \
+                     test_publisher_subscriber test_transport_mode_selection \
+                     test_shm_segment_robustness test_shm_block_lease_generation \
+                     test_shm_dispatcher_robustness test_shm_transmitter_receiver \
+                     test_shm_loaned_message test_shm_transmitter_lifecycle_regression \
+                     test_loaned_message_hybrid test_hybrid_intra \
+                     test_intra_transmitter_lifecycle test_logger_paths
+INTEGRATION_TEST_TARGETS := test_condition_notifier test_shm_segment_exec test_posix_segment_multiprocess \
+                            test_loaned_message_dynamic_shm_lifecycle \
+                            test_shm_loaned_message_multiprocess \
+                            test_hybrid_shm_multiprocess \
+                            test_rtps_same_host_multiprocess \
+                            test_hybrid_dynamic_shm_lifecycle \
+                            test_rtps_lifecycle_regression \
+                            test_loaned_message_rtps_multiprocess \
+                            test_rtps_transmitter_lifecycle \
+                            test_loaned_message_discovery_churn
+FORMAL_TEST_TARGETS := $(FAST_TEST_TARGETS) $(INTEGRATION_TEST_TARGETS)
+
+# Hand-operated programs and diagnostics remain buildable, but are never run
+# by `check`.  The other legacy targets are intentionally left outside both
+# formal regression and demos until they gain reliable result reporting.
+DEMO_TEST_TARGETS := test_writer test_reader test_publisher test_subscriber \
+                     test_topology_manager test_log test_getenv
+LEGACY_TEST_TARGETS := test_node_manager test_channel_manager test_croutine \
+                       test_scheduler test_task test_class_loader
+ALL_TEST_TARGETS := $(FORMAL_TEST_TARGETS) $(DEMO_TEST_TARGETS) \
+                    $(LEGACY_TEST_TARGETS)
+BENCHMARK_TARGETS := shm_segment_benchmark shm_benchmark_sender shm_benchmark_receiver
 CLASS_LOADER_PLUGIN_DIR := $(PROJECT_ROOT)/class_loader/test
 CLASS_LOADER_PLUGINS := $(CLASS_LOADER_PLUGIN_DIR)/libplugin1.so \
                         $(CLASS_LOADER_PLUGIN_DIR)/libplugin2.so
+
+TEST_RUNNER ?= $(CURDIR)/run_tests.sh
+CHECK_FAST_TIMEOUT ?= 30
+CHECK_INTEGRATION_TIMEOUT ?= 90
 
 PUBLISHER_OBJ  := $(OBJ_DIR)/example/test_publisher.o
 SUBSCRIBER_OBJ := $(OBJ_DIR)/example/test_subscriber.o
@@ -88,9 +137,13 @@ FAST_DDS_REQUIRED := \
 
 .DEFAULT_GOAL := all
 
-.PHONY: all publisher subscriber tests $(TEST_TARGETS) $(BENCHMARK_TARGETS) check-fastdds clean
+-include $(DEPENDENCY_FILES)
+
+.PHONY: all publisher subscriber tests demos benchmarks check check-fast \
+        check-integration $(ALL_TEST_TARGETS) $(BENCHMARK_TARGETS) \
+        check-fastdds clean
 .SECONDARY: $(TEST_CORE_OBJS) \
-            $(addprefix $(OBJ_DIR)/example/,$(addsuffix .o,$(TEST_TARGETS)))
+            $(addprefix $(OBJ_DIR)/example/,$(addsuffix .o,$(ALL_TEST_TARGETS)))
 
 all: publisher subscriber
 
@@ -98,9 +151,37 @@ publisher: $(PUBLISHER_BIN)
 
 subscriber: $(SUBSCRIBER_BIN)
 
-tests: $(TEST_TARGETS)
+tests: $(FORMAL_TEST_TARGETS)
 
-$(TEST_TARGETS): %: $(BIN_DIR)/%
+demos: $(DEMO_TEST_TARGETS)
+
+benchmarks: $(BENCHMARK_TARGETS)
+
+# Each group first builds its complete target list.  The runner then launches
+# every binary in sequence, even when make itself was invoked with -j.
+check-fast: $(FAST_TEST_TARGETS) $(TEST_RUNNER)
+	@bash "$(TEST_RUNNER)" --bin-dir "$(BIN_DIR)" \
+		--timeout "$(CHECK_FAST_TIMEOUT)" $(FAST_TEST_TARGETS)
+
+check-integration: $(INTEGRATION_TEST_TARGETS) $(TEST_RUNNER)
+	@bash "$(TEST_RUNNER)" --bin-dir "$(BIN_DIR)" \
+		--timeout "$(CHECK_INTEGRATION_TIMEOUT)" $(INTEGRATION_TEST_TARGETS)
+
+# Use recipes rather than parallel prerequisites so `make -j check` still
+# executes the two groups in order.  Run integration even if fast regresses,
+# then report one combined result.
+check:
+	@status=0; \
+	$(MAKE) --no-print-directory check-fast || status=1; \
+	$(MAKE) --no-print-directory check-integration || status=1; \
+	if test $$status -ne 0; then \
+		echo "check: FAILED (see group summaries above)" >&2; \
+	else \
+		echo "check: PASSED"; \
+	fi; \
+	exit $$status
+
+$(ALL_TEST_TARGETS): %: $(BIN_DIR)/%
 
 $(BENCHMARK_TARGETS): %: $(BIN_DIR)/%
 
@@ -119,16 +200,27 @@ $(SUBSCRIBER_BIN): $(SUBSCRIBER_CORE_OBJS) $(SUBSCRIBER_OBJ) Makefile | check-fa
 
 $(BIN_DIR)/test_class_loader: LDFLAGS += -Wl,--export-dynamic
 
+# Notifier tests need no DDS or scheduler; keep sanitizer runs focused.
+$(BIN_DIR)/test_condition_notifier: $(OBJ_DIR)/transport/shm/condition_notifier.o $(OBJ_DIR)/transport/shm/readable_info.o $(OBJ_DIR)/log/logger.o $(OBJ_DIR)/example/test_condition_notifier.o Makefile | $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) -lpthread -latomic -lgtest
+
+# Logger path checks need no transport, Discovery, or scheduler runtime.
+$(BIN_DIR)/test_logger_paths: $(OBJ_DIR)/log/logger.o $(OBJ_DIR)/example/test_logger_paths.o Makefile | $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) -lpthread -lgtest
+
 $(BIN_DIR)/test_%: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/test_%.o Makefile | check-fastdds $(BIN_DIR)
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS) -lgtest
 
 $(BIN_DIR)/shm_segment_benchmark: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/shm_segment_benchmark.o Makefile | check-fastdds $(BIN_DIR)
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
 
+$(BIN_DIR)/shm_benchmark_%: $(PUBLISHER_CORE_OBJS) $(OBJ_DIR)/example/shm_benchmark_%.o Makefile | check-fastdds $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
+
 $(CLASS_LOADER_PLUGIN_DIR)/lib%.so: $(CLASS_LOADER_PLUGIN_DIR)/%.cc | $(CMW_INCLUDE_LINK)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared -fPIC -o $@ $^ -lpthread -ldl
 
-$(OBJ_DIR)/%.o: $(PROJECT_ROOT)/%.cpp | $(CMW_INCLUDE_LINK)
+$(OBJ_DIR)/%.o: $(PROJECT_ROOT)/%.cpp Makefile | $(CMW_INCLUDE_LINK)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
 
@@ -146,4 +238,4 @@ $(BIN_DIR):
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(CLASS_LOADER_PLUGINS)
-	rm -f $(CURDIR)/*.log
+	# Runtime logs and archived logs in $(PROJECT_ROOT)/log are retained.

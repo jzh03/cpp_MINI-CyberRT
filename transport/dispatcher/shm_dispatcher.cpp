@@ -34,12 +34,30 @@ void ShmDispatcher::OnMessage(uint64_t channel_id,
     //根据channel_id 拿到对应的ListenerHandler
     if (msg_listeners_.Get(channel_id, &handler_base)){
         auto handler = std::dynamic_pointer_cast<ListenerHandler<ReadableBlock>>(*handler_base);
+        if(handler == nullptr) {
+            AERROR << "shm listener type does not match serialized message.";
+            return;
+        }
         //执行回调
         handler->Run(rb, msg_info);
     } else {
     AERROR << "Cannot find " << GlobalData::GetChannelById(channel_id)
            << "'s handler.";
   }
+}
+
+void ShmDispatcher::AddLoanedListener(
+    const RoleAttributes& self_attr,
+    const MessageListener<LoanedMessage>& listener) {
+    Dispatcher::AddListener<LoanedMessage>(self_attr, listener);
+    AddSegment(self_attr);
+}
+
+void ShmDispatcher::AddLoanedListener(
+    const RoleAttributes& self_attr, const RoleAttributes& opposite_attr,
+    const MessageListener<LoanedMessage>& listener) {
+    Dispatcher::AddListener<LoanedMessage>(self_attr, opposite_attr, listener);
+    AddSegment(self_attr);
 }
 
 
@@ -58,19 +76,40 @@ void ShmDispatcher::AddSegment(const RoleAttributes& self_attr){
     previous_indexs_[channel_id] = UINT32_MAX;
 }
 
-void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index){
+void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index,
+                                uint64_t generation){
       ADEBUG << "Reading sharedmem message: "
          << GlobalData::GetChannelById(channel_id)
          << " from block: " << block_index;
       auto rb = std::make_shared<ReadableBlock>();
       rb->index = block_index;
       //读取共享内存保存到rb中
-      if( !segments_[channel_id]->AcquireBlockToRead(rb.get())){
+      SegmentPtr segment = segments_[channel_id];
+      if( !segment->AcquireBlockToRead(rb.get())){
         AWARN << "fail to acquire block, channel: "
           << GlobalData::GetChannelById(channel_id)
           << " index: " << block_index;
         return;
       }
+    ReadableBlockLease read_lease(segment, *rb);
+
+    if(rb->block->generation() != generation){
+        ADEBUG << "stale shm block generation, channel: "
+               << GlobalData::GetChannelById(channel_id)
+               << " index: " << block_index;
+        return;
+    }
+
+    if(rb->block->msg_size() > segment->payload_capacity()) {
+        AERROR << "invalid shm payload size.";
+        return;
+    }
+
+    if(rb->block->msg_info_size() < ID_SIZE * 2 + sizeof(uint64_t) ||
+       rb->block->msg_info_size() > segment->message_info_capacity()){
+        AERROR << "invalid shm message info size.";
+        return;
+    }
 
     MessageInfo msg_info;
     const char* msg_info_addr = 
@@ -84,11 +123,32 @@ void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index){
     spare_id.set_data(msg_info_addr + ID_SIZE);
     msg_info.set_spare_id(spare_id);
     //拷贝 seq
-    msg_info.set_seq_num(*(reinterpret_cast<uint64_t*>(const_cast<char*>(msg_info_addr+2*ID_SIZE))));
+    uint64_t seq_num = 0;
+    std::memcpy(&seq_num, msg_info_addr + 2 * ID_SIZE, sizeof(seq_num));
+    msg_info.set_seq_num(seq_num);
+
+    if(segment->message_type() == ShmMessageType::LOANED) {
+        ListenerHandlerBasePtr* handler_base = nullptr;
+        if(!msg_listeners_.Get(channel_id, &handler_base)) {
+            AERROR << "Cannot find " << GlobalData::GetChannelById(channel_id)
+                   << "'s loaned handler.";
+            return;
+        }
+        auto handler = std::dynamic_pointer_cast<ListenerHandler<LoanedMessage>>(
+            *handler_base);
+        if(handler == nullptr) {
+            AERROR << "shm listener type does not match loaned message.";
+            return;
+        }
+
+        auto message = std::make_shared<LoanedMessage>(
+            rb->buf, rb->block->msg_size(), segment->payload_capacity(),
+            std::move(read_lease), channel_id, rb->index, generation);
+        handler->Run(message, msg_info);
+        return;
+    }
 
     OnMessage(channel_id,rb,msg_info);
-    //释放此block的读锁
-    segments_[channel_id]->ReleaseReadBlock(*rb);
 }
 
 void ShmDispatcher::ThreadFunc(){
@@ -108,6 +168,7 @@ void ShmDispatcher::ThreadFunc(){
 
         uint64_t channel_id  = readable_info.channel_id();
         uint32_t block_index = readable_info.block_index();
+        uint64_t generation = readable_info.generation();
 
         {
             ReadLockGuard<AtomicRWLock> lg(segments_lock_);
@@ -135,7 +196,7 @@ void ShmDispatcher::ThreadFunc(){
             } 
             //更新上一次的索引
             previous_index = block_index;
-            ReadMessage(channel_id, block_index);
+            ReadMessage(channel_id, block_index, generation);
         }
     }
     

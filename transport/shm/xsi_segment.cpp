@@ -7,7 +7,8 @@ namespace hnu{
 namespace cmw{
 namespace transport{
 
-XsiSegment::XsiSegment(uint64_t channel_id) : Segment(channel_id){
+XsiSegment::XsiSegment(uint64_t channel_id, uint64_t initial_msg_size)
+    : Segment(channel_id, initial_msg_size) {
     key_ = static_cast<key_t>(channel_id);
 }
 
@@ -19,27 +20,11 @@ bool XsiSegment::OpenOrCreate() {
         return true;
     }
 
-    int retry = 0;
-    int shmid = 0;
-    //创建共享内存
-    while (retry < 2)
-    {
-        shmid = shmget(key_ , conf_.managed_shm_size() , 0644 | IPC_CREAT | IPC_EXCL);
-        if(shmid != -1){
-            break;
-        }
-
-        if(EINVAL == errno){
-            AINFO << "need larger space, recreate.";
-            Reset();
-            Remove();
-            ++retry;
-        } else if (EEXIST == errno){
-            ADEBUG << "shm already exist, open only.";
-            return OpenOnly();
-        } else {
-            break;
-        }
+    int shmid = shmget(key_ , conf_.managed_shm_size() ,
+                       0644 | IPC_CREAT | IPC_EXCL);
+    if(shmid == -1 && EEXIST == errno){
+        ADEBUG << "shm already exist, open only.";
+        return OpenOnly();
     }
 
     if(shmid == -1){
@@ -51,6 +36,7 @@ bool XsiSegment::OpenOrCreate() {
     managed_shm_ = shmat(shmid, nullptr , 0);
     if(managed_shm_ == reinterpret_cast<void*>(-1)){
         AERROR << "attach shm failed, error: " << strerror(errno);
+        managed_shm_ = nullptr;
         shmctl(shmid , IPC_RMID , 0); //删除共享内存
         return false;
     }
@@ -66,8 +52,8 @@ bool XsiSegment::OpenOrCreate() {
 
     conf_.Update(state_->ceiling_msg_size());
 
-    blocks_ = new (static_cast<char*>(managed_shm_) + sizeof(State)) 
-                    Block[conf_.block_num()];
+    blocks_ = reinterpret_cast<Block*>(static_cast<char*>(managed_shm_) +
+                                      sizeof(State));
     if(blocks_ == nullptr){
         AERROR << "create blocks failed.";
         state_->~State();
@@ -76,6 +62,9 @@ bool XsiSegment::OpenOrCreate() {
         managed_shm_ = nullptr;
         shmctl(shmid, IPC_RMID, 0);
         return false;
+    }
+    for(uint32_t i = 0; i < conf_.block_num(); ++i){
+        new (blocks_ + i) Block();
     }
 
     //为每个 Block buf 创建内存
@@ -91,6 +80,21 @@ bool XsiSegment::OpenOrCreate() {
 
     if( i != conf_.block_num()){
         AERROR << "create block buf failed.";
+        state_->~State();
+        state_ = nullptr;
+        blocks_ = nullptr;
+        {
+            std::lock_guard<std::mutex> _g(block_buf_lock_);
+            block_buf_addrs_.clear();
+        }
+        shmdt(managed_shm_);
+        managed_shm_ = nullptr;
+        shmctl(shmid, IPC_RMID, 0);
+        return false;
+    }
+
+    if(!InitializeLayout()){
+        AERROR << "initialize shm layout failed.";
         state_->~State();
         state_ = nullptr;
         blocks_ = nullptr;
@@ -124,21 +128,26 @@ bool XsiSegment::OpenOnly(){
     managed_shm_ = shmat(shmid, nullptr, 0);
     if (managed_shm_ == reinterpret_cast<void*>(-1)) {
         AERROR << "attach shm failed, error: " << strerror(errno);
+        managed_shm_ = nullptr;
         return false;
     }
 
-      // get field state_
-    state_ = reinterpret_cast<State*>(managed_shm_);
-    if (state_ == nullptr) {
-        AERROR << "get state failed.";
+    struct shmid_ds shm_info;
+    if(shmctl(shmid, IPC_STAT, &shm_info) == -1){
+        AERROR << "get shm size failed. error: " << strerror(errno);
         shmdt(managed_shm_);
         managed_shm_ = nullptr;
         return false;
     }
 
-    conf_.Update(state_->ceiling_msg_size());
+      // get field state_
+    if(!HasValidLayout(shm_info.shm_segsz)){
+        AERROR << "incompatible shm layout.";
+        Reset();
+        return false;
+    }
+    state_ = reinterpret_cast<State*>(managed_shm_);
 
-      // get field blocks_
     blocks_ = reinterpret_cast<Block*>(static_cast<char*>(managed_shm_) +
                                      sizeof(State));
 
@@ -164,17 +173,7 @@ bool XsiSegment::OpenOnly(){
     }
 
     if (i != conf_.block_num()) {
-        AERROR << "open only failed.";
-        state_->~State();
-        state_ = nullptr;
-        blocks_ = nullptr;
-        {
-        std::lock_guard<std::mutex> _g(block_buf_lock_);
-        block_buf_addrs_.clear();
-        }
-        shmdt(managed_shm_);
-        managed_shm_ = nullptr;
-        shmctl(shmid, IPC_RMID, 0);
+        Reset();
         return false;
     }
 

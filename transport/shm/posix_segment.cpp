@@ -15,7 +15,8 @@ namespace hnu{
 namespace cmw{
 namespace transport{
 
-PosixSegment::PosixSegment(uint64_t channel_id) : Segment(channel_id), mapped_size_(0) {
+PosixSegment::PosixSegment(uint64_t channel_id, uint64_t initial_msg_size)
+    : Segment(channel_id, initial_msg_size), mapped_size_(0) {
     shm_name_ = "/cmw_" + std::to_string(channel_id);
 }
 
@@ -76,8 +77,8 @@ bool PosixSegment::OpenOrCreate() {
     }
 
     //创建blocks
-    blocks_ = new (static_cast<char*>(managed_shm_) + sizeof(State)) 
-        Block[conf_.block_num()];
+    blocks_ = reinterpret_cast<Block*>(static_cast<char*>(managed_shm_) +
+                                      sizeof(State));
     if(blocks_ == nullptr){
         std::cout << "create blocks failed." << std::endl;
         state_->~State();
@@ -87,6 +88,9 @@ bool PosixSegment::OpenOrCreate() {
         mapped_size_ = 0;
         shm_unlink(shm_name_.c_str());
         return false;
+    }
+    for(uint32_t i = 0; i < conf_.block_num(); ++i){
+        new (blocks_ + i) Block();
     }
 
     //创建 block buf
@@ -107,6 +111,22 @@ bool PosixSegment::OpenOrCreate() {
 
     if ( i != conf_.block_num()){
         std::cout<< "create block buf failed.";
+        state_->~State();
+        state_ = nullptr;
+        blocks_ = nullptr;
+        {
+        std::lock_guard<std::mutex> lg(block_buf_lock_);
+        block_buf_addrs_.clear();
+        }
+        munmap(managed_shm_, mapped_size_);
+        managed_shm_ = nullptr;
+        mapped_size_ = 0;
+        shm_unlink(shm_name_.c_str());
+        return false;
+    }
+
+    if(!InitializeLayout()){
+        std::cout << "initialize shm layout failed." << std::endl;
         state_->~State();
         state_ = nullptr;
         blocks_ = nullptr;
@@ -167,21 +187,12 @@ bool PosixSegment::OpenOnly(){
     close(fd);
     mapped_size_ = static_cast<std::size_t>(file_attr.st_size);
     //直接转换
-    state_ = reinterpret_cast<State*>(managed_shm_);         
-    if (state_ == nullptr) {
-        std::cout << "get state failed." << std::endl;
-        munmap(managed_shm_, mapped_size_);
-        managed_shm_ = nullptr;
-        mapped_size_ = 0;
-        return false;
-    }
-
-    conf_.Update(state_->ceiling_msg_size());
-    if(mapped_size_ < conf_.managed_shm_size()){
-        std::cout << "shm size is too small." << std::endl;
+    if(!HasValidLayout(mapped_size_)){
+        std::cout << "incompatible shm layout." << std::endl;
         Reset();
         return false;
     }
+    state_ = reinterpret_cast<State*>(managed_shm_);
 
     blocks_ = reinterpret_cast<Block*>(static_cast<char*>(managed_shm_) + sizeof(State));
 

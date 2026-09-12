@@ -164,12 +164,18 @@ void ListenerHandler<MessageT>::Run(const Message& msg,
     signal_(msg, msg_info);
     //
     uint64_t oppo_id = msg_info.sender_id().HashValue();    
-    ReadLockGuard<AtomicRWLock> lock(rw_lock_);   
-    if (signals_.find(oppo_id) == signals_.end()) {
-        return;
-    }  
-
-    (*signals_[oppo_id])(msg, msg_info);        
+    SignalPtr signal;
+    {
+        ReadLockGuard<AtomicRWLock> lock(rw_lock_);
+        auto it = signals_.find(oppo_id);
+        if (it != signals_.end()) {
+            signal = it->second;
+        }
+    }
+    // A callback may disconnect or publish again on this same channel.
+    if (signal != nullptr) {
+        (*signal)(msg, msg_info);
+    }
 
 }
 

@@ -8,7 +8,7 @@ using namespace hnu::cmw::config;
 using namespace hnu::cmw::blocker;
 
 
-void BlockerTest_constructor(){
+TEST(BlockerTest, ConstructorAndCapacity) {
     BlockerAttr attr(10, "channel");
     Blocker<UnitTest> blocker(attr);
 
@@ -19,7 +19,7 @@ void BlockerTest_constructor(){
     EXPECT_EQ(blocker.capacity(), 20);
 }
 
-void BlockerTest_setcapacity(){
+TEST(BlockerTest, CapacityCanShrinkAfterPublish) {
     BlockerAttr attr(0, "channel");
     Blocker<UnitTest> blocker(attr);
     EXPECT_EQ(blocker.capacity(), 0);
@@ -39,7 +39,7 @@ void BlockerTest_setcapacity(){
     EXPECT_EQ(blocker.capacity(), 1);
 }
 
-void BlockerTest_publish(){
+TEST(BlockerTest, PublishObserveAndClear) {
     BlockerAttr attr(10, "channel");
     Blocker<UnitTest> blocker(attr);
 
@@ -79,7 +79,7 @@ void BlockerTest_publish(){
     EXPECT_TRUE(blocker.IsObservedEmpty());
 }
 
-void BlockerTest_subscribe(){
+TEST(BlockerTest, SubscribeDeliversAndRejectsDuplicateName) {
     BlockerAttr attr(10, "channel");
     Blocker<UnitTest> blocker(attr);
 
@@ -110,7 +110,13 @@ void BlockerTest_subscribe(){
 
 void cb(const std::shared_ptr<UnitTest>& msg_ptr) { UNUSED(msg_ptr); }
 
-void BlockerTest_blocker_manager_test(){
+class BlockerManagerTest : public testing::Test {
+ protected:
+  void SetUp() override { BlockerManager::Instance()->Reset(); }
+  void TearDown() override { BlockerManager::Instance()->Reset(); }
+};
+
+TEST_F(BlockerManagerTest, PublishSubscribeObserveAndReset) {
     auto block_mgr = BlockerManager::Instance();
     Blocker<UnitTest>::MessageType msgtype;
 
@@ -124,12 +130,8 @@ void BlockerTest_blocker_manager_test(){
     block_mgr->Reset();  
 }
 
-int main()
+int main(int argc, char** argv)
 {
-    BlockerTest_constructor();
-    BlockerTest_setcapacity();
-    BlockerTest_publish();
-    BlockerTest_subscribe();
-    BlockerTest_blocker_manager_test();
-    return 0;
+    testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }

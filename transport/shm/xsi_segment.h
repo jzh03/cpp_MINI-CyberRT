@@ -11,7 +11,8 @@ namespace transport{
 class XsiSegment : public Segment{
 
 public:
-    explicit XsiSegment(uint64_t channel_id);
+    explicit XsiSegment(uint64_t channel_id,
+                        uint64_t initial_msg_size = 0);
     virtual ~XsiSegment();
 
     static const char* Type() { return "xsi"; }

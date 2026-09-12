@@ -10,6 +10,7 @@
 #define CMW_BASE_SIGNAL_H_
 
 #include <algorithm>
+#include <atomic>
 #include <functional>
 #include <list>
 #include <memory>
@@ -178,7 +179,7 @@ class Slot {
  public:
   using Callback = std::function<void(Args...)>;
   Slot(const Slot& another)
-      : cb_(another.cb_), connected_(another.connected_) {}
+      : cb_(another.cb_), connected_(another.connected_.load()) {}
   explicit Slot(const Callback& cb, bool connected = true)
       : cb_(cb), connected_(connected) {}
   virtual ~Slot() {}
@@ -194,7 +195,9 @@ class Slot {
 
  private:
   Callback cb_;
-  bool connected_ = true;
+  // Disconnect may race with a snapshot already being dispatched.
+  // It prevents new admissions, but does not join an admitted callback.
+  std::atomic<bool> connected_{true};
 };
 }
 }

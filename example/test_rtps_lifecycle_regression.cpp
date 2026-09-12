@@ -23,6 +23,7 @@
 
 namespace hnu {
 namespace cmw {
+
 namespace {
 
 // 同机显式强制 RTPS 的生命周期回归消息，不代表跨主机自动路由。
@@ -136,6 +137,13 @@ int RunPublisher(const std::string& channel_name, int command_read_fd,
       if (!WriteByte(event_write_fd, 'E')) {
         return 6;
       }
+    } else if (command == 'H') {
+      RtpsLifecycleMessage probe;
+      probe.payload = "rtps-lifecycle-ready";
+      if (!transmitter->Transmit(std::make_shared<RtpsLifecycleMessage>(probe)) ||
+          !WriteByte(event_write_fd, 'H')) {
+        return 12;
+      }
     } else if (command == 'S') {
       RtpsLifecycleMessage message;
       message.sequence = sequence++;
@@ -169,6 +177,8 @@ int RunSubscriber(const std::string& channel_name, uint64_t expected_sequence,
   std::mutex mutex;
   std::condition_variable condition;
   size_t received = 0;
+  bool matched = false;
+  bool malformed = false;
   auto receiver = transport::Transport::Instance()->CreateReceiver<
       RtpsLifecycleMessage>(
       MakeRoleAttributes(channel_name,
@@ -176,10 +186,20 @@ int RunSubscriber(const std::string& channel_name, uint64_t expected_sequence,
       [&](const std::shared_ptr<RtpsLifecycleMessage>& message,
           const transport::MessageInfo&, const RoleAttributes&) {
         std::lock_guard<std::mutex> lock(mutex);
+        if (message->sequence == 0 && message->payload == "rtps-lifecycle-ready") {
+          if (!matched) {
+            matched = true;
+            WriteByte(ready_write_fd, 'M');
+          }
+          return;
+        }
         if (message->sequence == expected_sequence &&
             message->payload == "rtps-lifecycle-" +
                                     std::to_string(expected_sequence)) {
           ++received;
+          condition.notify_one();
+        } else {
+          malformed = true;
           condition.notify_one();
         }
       },
@@ -191,8 +211,8 @@ int RunSubscriber(const std::string& channel_name, uint64_t expected_sequence,
   bool received_once = false;
   {
     std::unique_lock<std::mutex> lock(mutex);
-    received_once = condition.wait_for(lock, std::chrono::seconds(6), [&]() {
-      return received == 1;
+    received_once = condition.wait_for(lock, std::chrono::seconds(10), [&]() {
+      return malformed || received == 1;
     });
   }
   // 单次发送后再留出短窗口，捕获失效 Writer 残留造成的重复投递。
@@ -201,7 +221,7 @@ int RunSubscriber(const std::string& channel_name, uint64_t expected_sequence,
   }
   {
     std::lock_guard<std::mutex> lock(mutex);
-    received_once = received_once && received == 1;
+    received_once = received_once && !malformed && received == 1;
   }
   receiver->Disable();
   transport::Transport::Instance()->Shutdown();
@@ -261,12 +281,19 @@ TEST(RtpsLifecycleRegressionTest, ForcedRtpsEnableDisableAcrossSubscriberReconne
     close(ready_pipe[1]);
     close(result_pipe[1]);
     ASSERT_TRUE(ReadByteWithTimeout(ready_pipe[0], 'R', 5000));
-    close(ready_pipe[0]);
-    // 给 RTPS discovery 留出 endpoint 匹配时间，Publisher 仍保持 Disable。
-    poll(nullptr, 0, 500);
     ASSERT_TRUE(WriteByte(command_pipe[1], 'E'));
     ASSERT_TRUE(ReadByteWithTimeout(event_pipe[0], 'E', 5000));
-    poll(nullptr, 0, 500);
+    // Confirm matching through real probe delivery. The actual regression
+    // message below is still sent exactly once; do not retry its payload.
+    bool matched = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!matched && std::chrono::steady_clock::now() < deadline) {
+      ASSERT_TRUE(WriteByte(command_pipe[1], 'H'));
+      ASSERT_TRUE(ReadByteWithTimeout(event_pipe[0], 'H', 5000));
+      matched = ReadByteWithTimeout(ready_pipe[0], 'M', 100);
+    }
+    ASSERT_TRUE(matched);
+    close(ready_pipe[0]);
     ASSERT_TRUE(WriteByte(command_pipe[1], 'S'));
     ASSERT_TRUE(ReadByteWithTimeout(event_pipe[0], 'S', 5000));
     ASSERT_TRUE(ReadByteWithTimeout(result_pipe[0], 'O', 7000));

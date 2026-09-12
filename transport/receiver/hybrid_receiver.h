@@ -3,6 +3,7 @@
 
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 
 #include <cmw/config/transport_mode.h>
@@ -38,6 +39,15 @@ class HybridReceiver : public Receiver<M> {
   }
 
   void Enable(const RoleAttributes& opposite_attr) override {
+    EnableImpl(opposite_attr, typename std::is_same<M, LoanedMessage>::type());
+  }
+
+  void Disable(const RoleAttributes& opposite_attr) override {
+    DisableImpl(opposite_attr, typename std::is_same<M, LoanedMessage>::type());
+  }
+
+ private:
+  void EnableImpl(const RoleAttributes& opposite_attr, std::false_type) {
     std::lock_guard<std::mutex> lock(mutex_);
     OptionalMode mode = config::SelectMode(this->attr_, opposite_attr);
     PeerMap* peers = Peers(mode);
@@ -53,7 +63,7 @@ class HybridReceiver : public Receiver<M> {
     GetReceiver(mode)->Enable(opposite_attr);
   }
 
-  void Disable(const RoleAttributes& opposite_attr) override {
+  void DisableImpl(const RoleAttributes& opposite_attr, std::false_type) {
     std::lock_guard<std::mutex> lock(mutex_);
     OptionalMode mode = config::SelectMode(this->attr_, opposite_attr);
     PeerMap* peers = Peers(mode);
@@ -69,7 +79,16 @@ class HybridReceiver : public Receiver<M> {
     peers->erase(peer);
   }
 
- private:
+  void EnableImpl(const RoleAttributes& opposite_attr, std::true_type) {
+    // LoanedMessage now supports all existing receiver paths. Its concrete
+    // decoder is selected by each Receiver/Dispatcher, not by Discovery.
+    EnableImpl(opposite_attr, std::false_type());
+  }
+
+  void DisableImpl(const RoleAttributes& opposite_attr, std::true_type) {
+    DisableImpl(opposite_attr, std::false_type());
+  }
+
   static std::string PeerKey(const RoleAttributes& attr) {
     // 优先使用 Discovery endpoint id，避免同 channel 多 Publisher 相互覆盖。
     if (attr.id != 0) {
@@ -93,6 +112,12 @@ class HybridReceiver : public Receiver<M> {
   }
 
   std::shared_ptr<Receiver<M>> GetReceiver(OptionalMode mode) {
+    return GetReceiverImpl(mode,
+        typename std::is_same<M, LoanedMessage>::type());
+  }
+
+  std::shared_ptr<Receiver<M>> GetReceiverImpl(OptionalMode mode,
+                                                 std::false_type) {
     // 仅在某种模式第一次出现时创建对应 Receiver。
     switch (mode) {
       case OptionalMode::INTRA:
@@ -116,6 +141,11 @@ class HybridReceiver : public Receiver<M> {
       default:
         return nullptr;
     }
+  }
+
+  std::shared_ptr<Receiver<M>> GetReceiverImpl(OptionalMode mode,
+                                                 std::true_type) {
+    return GetReceiverImpl(mode, std::false_type());
   }
 
   void DisablePeers(PeerMap& peers,

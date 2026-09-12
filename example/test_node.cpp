@@ -5,10 +5,11 @@
 #include <cmw/node/subscriber.h>
 #include <cmw/node/publisher.h>
 #include <cmw/config/unit_test.h>
+#include <cmw/scheduler/scheduler_factory.h>
 
 using namespace hnu::cmw;
 
-void NodeTest(){
+TEST(NodeTest, NameAndSubscriberRegistration) {
     auto node = CreateNode("node_test");
     EXPECT_EQ(node->Name(), "node_test");
     config::RoleAttributes attr;
@@ -18,11 +19,14 @@ void NodeTest(){
     attr.qos_profile.depth = 10;
 
     auto subscriber = node->CreateSubscriber<config::Chatter>(attr.channel_name);
-    EXPECT_TRUE(node->GetSubscriber<config::Chatter>(attr.channel_name));
+    ASSERT_NE(nullptr, subscriber);
+    EXPECT_NE(nullptr, node->GetSubscriber<config::Chatter>(attr.channel_name));
 }
-int main()
+int main(int argc, char** argv)
 {
     hnu::cmw::Init("NodeTest");
-    NodeTest();
-    return 0;
+    testing::InitGoogleTest(&argc, argv);
+    const int result = RUN_ALL_TESTS();
+    scheduler::Instance()->Shutdown();
+    return result;
 }

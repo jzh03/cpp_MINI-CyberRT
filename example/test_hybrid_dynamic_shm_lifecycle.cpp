@@ -26,6 +26,7 @@
 
 namespace hnu {
 namespace cmw {
+
 namespace {
 
 struct HybridDynamicShmMessage : public serialize::Serializable {
@@ -47,7 +48,9 @@ RoleAttributes MakeRoleAttributes(const std::string& channel_name,
   attr.node_name = channel_name + node_suffix;
   attr.node_id = common::GlobalData::RegisterNode(attr.node_name);
   attr.id = common::GlobalData::GenerateHashId(attr.node_name);
-  attr.message_type = "HybridDynamicShmMessage";
+  // Force the serialized discovery record past the former 255-byte buffer,
+  // independent of PID and timestamp length.
+  attr.message_type = "HybridDynamicShmMessage" + std::string(256, 'x');
   return attr;
 }
 

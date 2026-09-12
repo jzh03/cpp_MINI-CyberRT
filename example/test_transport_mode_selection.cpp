@@ -5,6 +5,9 @@
 
 #include <cmw/config/RoleAttributes.h>
 #include <cmw/config/transport_mode.h>
+#include <cmw/config/unit_test.h>
+#include <cmw/transport/transmitter/intra_transmitter.h>
+#include <cmw/transport/transmitter/rtps_transmitter.h>
 
 namespace hnu {
 namespace cmw {
@@ -45,6 +48,23 @@ TEST(TransportModeSelectionTest, OnlyHostAndProcessMetadataAffectsSelection) {
   opposite.channel_name = "opposite_channel";
   opposite.id = 2;
   EXPECT_EQ(OptionalMode::INTRA, SelectMode(local, opposite));
+}
+
+TEST(TransportModeSelectionTest, NonLoanedTransmittersRejectLoanedOperations) {
+  RoleAttributes attr{};
+  transport::IntraTransmitter<UnitTest> intra(attr);
+  EXPECT_EQ(nullptr, intra.AcquireLoanedMessage(8));
+  auto intra_message = transport::LoanedMessage::CreateHeap(0, 8);
+  ASSERT_NE(nullptr, intra_message);
+  EXPECT_FALSE(intra.TransmitLoanedMessage(
+      std::move(intra_message), transport::MessageInfo()));
+
+  transport::RtpsTransmitter<UnitTest> rtps(attr, nullptr);
+  EXPECT_EQ(nullptr, rtps.AcquireLoanedMessage(8));
+  auto rtps_message = transport::LoanedMessage::CreateHeap(0, 8);
+  ASSERT_NE(nullptr, rtps_message);
+  EXPECT_FALSE(rtps.TransmitLoanedMessage(
+      std::move(rtps_message), transport::MessageInfo()));
 }
 
 }  // namespace

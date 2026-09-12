@@ -16,7 +16,6 @@ struct TestMsg : public Serializable
     SERIALIZE(timestamp,image)
 };
 
-
 namespace george
 {
     using namespace config;
