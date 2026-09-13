@@ -20,6 +20,7 @@
 | 跑演示、准备面试讲解 | [通信 Demo](example/demo/README.md) |
 | 构建、运行测试或 benchmark | [测试与性能程序](example/TESTING.md) |
 | 查实际结果、失败原因和复验 | [测试记录](example/testlog.md) |
+| 串起整个项目、理解运行顺序与数据流 | [总体架构](doc/architecture.md) |
 | 理解一条消息怎么送达 | [通信流程](doc/transport.md) → [发现与拓扑](doc/topology.md) |
 | 定义消息类型 | [序列化](doc/serialize.md) |
 | 理解回调调度 | [调度器](doc/scheduler.md) → [协程](doc/croutine.md) |

@@ -6,6 +6,13 @@
 历史条目未给出完整命令的部分保留原记录，不将使用指南中的示例补写为已执行命令。
 纯文档及维护约定的改动和静态检查不纳入本页。
 
+本次历史补录依据本地聊天的工具调用/返回值与 Git 提交差异核对；日期使用
+实际执行时间（Asia/Shanghai），关联提交不等于当时干净 HEAD。下列会话
+文件位于本机 `/home/jim/.codex/sessions/YYYY/MM/DD/`；未将整段聊天复制入库。
+命令块保留当时参数和重定向路径，工作目录从工具调用参数另行标明；未完整
+保存的退出码、日志或环境字段明确说明。历史 `/tmp` 日志不保证仍存在，
+不把助手建议的命令、用户手动 Demo 输出或提交标题当作已执行测试的证据。
+
 ## 查找记录
 
 按改动模块分组，组内按时间从早到晚排列；同日按正文先后，日期未记录的条目放在组末。
@@ -14,16 +21,1087 @@
 
 | 改动模块 | 记录时间 | 记录入口 |
 | --- | --- | --- |
+| Serialize 序列化 | 2026-08-23 | [边界检查、ASan/UBSan 与旧对象崩溃复验](#2026-08-23-序列化边界与发布订阅回归) |
+| SHM 共享内存 | 2026-08-25 | [Segment、Dispatcher、收发恢复；泄漏检查关闭](#2026-08-25-shm-健壮性与-sanitizer-回归) |
+| SHM 共享内存 | 2026-09-01 | [POSIX/XSI、跨进程回归与三次基准执行](#2026-09-01-posix-修复与双后端基准) |
+| SHM 共享内存 | 2026-09-03 | [布局保护、RAII；Hybrid 失败和清理后复验](#2026-09-03-generation-与-lease-首轮回归) |
+| SHM 共享内存 | 2026-09-03 | [SHM Loan/View、持有背压及普通 SHM 复验](#2026-09-03-loanedmessage-跨进程与背压回归) |
+| SHM 共享内存 | 2026-09-05 | [普通复验、受限 UBSan 通过及 TSan 启动失败](#2026-09-05-元数据对齐与发送生命周期回归) |
 | SHM 共享内存 | 2026-09-10 | [布局、Loan 首轮验证与环境失败](#2026-09-10-首轮验证) |
 | SHM 共享内存 | 2026-09-10 20:01 | [普通构建及 UBSan 复跑](#2026-09-10-2001-后续复跑) |
 | SHM 共享内存 | 2026-09-11 | [Notifier 并发、丢弃与 sanitizer 回归](#2026-09-11-notifier-发布短锁槽位互斥及丢弃策略) |
 | SHM 共享内存 | 2026-09-11 | [独立进程性能实验：三轮数据与统计口径](#2026-09-11-独立进程-shm-性能实验) |
 | SHM 共享内存 | 未记录 | [共享内存布局 v1/v2 实测数据](#本次共享内存布局核对) |
+| Transport 发送端 | 2026-08-30 | [Writer 生命周期及 INTRA/SHM 离开重加入](#2026-08-30-rtps-资源释放与动态订阅回归) |
+| Transport 发送端 | 2026-09-05 | [Hybrid 通过、RTPS 环境失败及旧 quick 基准](#2026-09-05-loanedmessage-混合传输首轮验证) |
 | Transport 发送端 | 2026-09-10 | [INTRA、SHM、RTPS 生命周期同步与重入](#2026-09-10-发送端生命周期同步) |
+| Discovery 自动发现 | 2026-08-27 | [INTRA、自动 XSI SHM、同机强制 RTPS](#2026-08-27-discovery-驱动的传输选择) |
 | Discovery 自动发现 | 2026-09-13 | [全新订阅进程发现修复、失败复现及 Demo 复验](#2026-09-13-discovery-全新订阅进程自动发现修复) |
 | Logger 日志 | 2026-09-11 | [统一日志目录、旧日志迁移与路径检查](#2026-09-11-统一日志目录) |
 | 通信 Demo | 2026-09-12 | [A～E、两轮完整运行、4 MiB 与 Ctrl+C](#2026-09-12-面试通信-demo-本地验收) |
+| 测试构建与执行器 | 2026-09-06 | [fast 13 过、integration 6 过 2 崩溃；runner 失败检测](#2026-09-06-测试集整理与首轮失败) |
+| 测试构建与执行器 | 2026-09-06 | [旧对象、RTPS 填充、runner 修复与 ASan/UBSan](#2026-09-06-独立构建与-loan-崩溃修复复验) |
 | 运行环境 | 未记录 | [早期 TSan 启动限制](#更早的环境记录日期未记录) |
+
+## 2026-08-23 序列化边界与发布订阅回归
+
+分支 `dev`；测试时完整 HEAD 未单独保存，不以事后提交号代替。普通构建使用
+`example/build`，早期独立构建为 `/tmp/cyberrt-serialize-build-verified`。环境为
+本地 Linux VM、C++14、Fast DDS 安装目录 `/home/jim/cpp/fastdds_2.12/install`。
+
+关联提交：`ac11f99`（2026-08-23）。来源：本地会话 `01a02d78-75be-7282-b206-84a5aa9c0388`
+（文件 `rollout-2026-08-23T15-14-24-01a02d78-75be-7282-b206-84a5aa9c0388.jsonl`）；下列行号指 JSONL 原文件。
+
+15:39 的独立目录构建，以及 15:40 的序列化测试及 ASan+UBSan：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 377 行）：
+
+```sh
+make BUILD_DIR=/tmp/cyberrt-serialize-build-verified test_serialize test_publisher_subscriber -j2
+```
+
+工作目录 `/tmp`（会话第 405 行）：
+
+```sh
+/tmp/cyberrt-serialize-build-verified/bin/test_serialize
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 405 行）：
+
+```sh
+g++ -std=c++14 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Iexample/build/include -Ithirdparty serialize/data_stream.cpp example/test_serialize.cpp -lgtest -lpthread -o /tmp/cyberrt_test_serialize_sanitized_verified
+```
+
+工作目录 `/tmp`（会话第 409 行）：
+
+```sh
+env ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 /tmp/cyberrt_test_serialize_sanitized_verified
+```
+
+15:54 的发布订阅失败：下面同一命令先在沙箱内运行，再在沙箱外运行。
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 509 行）：
+
+```sh
+timeout 20s env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 ./build/bin/test_publisher_subscriber
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 513 行）：
+
+```sh
+timeout 20s env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 ./build/bin/test_publisher_subscriber
+```
+
+强制重建后的复验及 16:26 最后一次运行：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 553 行）：
+
+```sh
+make -B test_serialize test_publisher_subscriber -j2
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 580 行）：
+
+```sh
+timeout 20s env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 ./build/bin/test_publisher_subscriber
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 645 行）：
+
+```sh
+make test_serialize test_publisher_subscriber -j2
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 653 行）：
+
+```sh
+./build/bin/test_serialize
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 656 行）：
+
+```sh
+timeout 20s env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 ./build/bin/test_publisher_subscriber
+```
+
+独立目录序列化 4 项及 ASan+UBSan 4 项均退出 0；`detect_leaks=0`，不包括泄漏验证。
+沙箱内发布订阅退出 134；沙箱外旧二进制退出 139，随后 `make -B` 重建后输出
+`Publisher/Subscriber serialization round-trip: PASS`。最后一轮普通序列化输出
+Vector round-trip、Truncated payload、Invalid string length、Invalid vector length
+四项 PASS，退出 0；发布订阅输出 round-trip PASS。部分发布订阅调用先返回运行中
+会话，所列即时输出未保存最终退出码，不能只凭 PASS 行推断完整进程清理成功。
+这是当时单机发布订阅路径的字段往返验证，不是跨主机验证。未指定输出重定向的
+结果保存在上述聊天工具输出中；旧运行日志迁移规则见[统一日志目录](#2026-09-11-统一日志目录)。
+
+## 2026-08-25 SHM 健壮性与 sanitizer 回归
+
+分支 `dev`，测试时完整 HEAD 未单独保存。普通产物在 `example/build`；
+ASan+UBSan 使用 `/tmp/cmw_shm_sanitized`。运行特意在 `/tmp` 进行，
+使用显式 `CMW_PATH` 和 `CMW_IP=127.0.0.1`；不能按今天的默认日志目录规则
+改写这些历史工作目录。
+
+关联提交：`a765d9c`（2026-08-25）。来源：本地会话 `01a03828-0399-7740-a617-fcaf43315315`
+（文件 `rollout-2026-08-25T17-02-21-01a03828-0399-7740-a617-fcaf43315315.jsonl`）；下列行号指 JSONL 原文件。
+
+普通构建与三项 SHM 程序：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 280 行）：
+
+```sh
+make -j4 test_shm_segment_robustness test_shm_dispatcher_robustness test_shm_transmitter_receiver
+```
+
+工作目录 `/tmp`（会话第 292 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 /home/jim/cpp/CyberRT/example/build/bin/test_shm_segment_robustness
+```
+
+工作目录 `/tmp`（会话第 296 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 /home/jim/cpp/CyberRT/example/build/bin/test_shm_dispatcher_robustness
+```
+
+工作目录 `/tmp`（会话第 300 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 /home/jim/cpp/CyberRT/example/build/bin/test_shm_transmitter_receiver
+```
+
+独立 ASan+UBSan 构建、三项执行及 Segment 最后复验：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 340 行）：
+
+```sh
+make -s -j4 BUILD_DIR=/tmp/cmw_shm_sanitized CXXFLAGS='-std=c++14 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-L/home/jim/cpp/fastdds_2.12/install/lib -Wl,-rpath,/home/jim/cpp/fastdds_2.12/install/lib -fsanitize=address,undefined' test_shm_segment_robustness test_shm_dispatcher_robustness test_shm_transmitter_receiver
+```
+
+工作目录 `/tmp`（会话第 348 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 /tmp/cmw_shm_sanitized/bin/test_shm_segment_robustness
+```
+
+工作目录 `/tmp`（会话第 352 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 /tmp/cmw_shm_sanitized/bin/test_shm_dispatcher_robustness
+```
+
+工作目录 `/tmp`（会话第 356 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 /tmp/cmw_shm_sanitized/bin/test_shm_transmitter_receiver
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 377 行）：
+
+```sh
+make -s -j4 test_shm_segment_robustness
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 377 行）：
+
+```sh
+make -s -j4 BUILD_DIR=/tmp/cmw_shm_sanitized CXXFLAGS='-std=c++14 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-L/home/jim/cpp/fastdds_2.12/install/lib -Wl,-rpath,/home/jim/cpp/fastdds_2.12/install/lib -fsanitize=address,undefined' test_shm_segment_robustness
+```
+
+工作目录 `/tmp`（会话第 381 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 /home/jim/cpp/CyberRT/example/build/bin/test_shm_segment_robustness
+```
+
+工作目录 `/tmp`（会话第 381 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 /tmp/cmw_shm_sanitized/bin/test_shm_segment_robustness
+```
+
+相关序列化/发布订阅回归：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 306 行）：
+
+```sh
+make -j4 test_serialize test_publisher_subscriber
+```
+
+工作目录 `/tmp`（会话第 310 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 /home/jim/cpp/CyberRT/example/build/bin/test_serialize
+```
+
+工作目录 `/tmp`（会话第 315 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 /home/jim/cpp/CyberRT/example/build/bin/test_publisher_subscriber
+```
+
+工作目录 `/tmp`（会话第 319 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 /home/jim/cpp/CyberRT/example/build/bin/test_publisher_subscriber
+```
+
+普通及 sanitizer 的 Segment 7 项、Dispatcher 1 项、Transmitter/Receiver 1 项
+均通过，运行退出 0；最后 Segment 两种配置各 7 项复验退出 0。Segment 使用
+内存替身测试边界、满块有界失败与 remap 后索引，不代表真实 OS SHM；后两个
+程序覆盖真实本机 SHM 异常丢弃、重建和超限后恢复。ASan 设置 `detect_leaks=0`，
+不能声称无泄漏。序列化四项 PASS、退出 0；Publisher/Subscriber 沙箱内退出 134，
+沙箱外调用曾持续运行，本轮不将其计入三项 SHM 通过结果。
+未单独重定向构建/测试输出，证据为会话工具结果；项目内旧运行日志后来按
+[迁移清单](#2026-09-11-统一日志目录)归档。
+
+## 2026-08-27 Discovery 驱动的传输选择
+
+分支 `dev`；会话早期状态输出包含 `ac11f99ff36adf975d27b0135f206916f9d15362`，
+测试时工作区另有 SHM 健壮性及本轮修改，不能当作该提交的干净构建。
+普通 `BUILD_DIR` 为 `/home/jim/cpp/CyberRT/example/build`，未启用 sanitizer。
+
+关联提交：`b3d95d3`（2026-08-30）。来源：本地会话 `01a041f5-ff9d-7383-99de-8410947d6d52`
+（文件 `rollout-2026-08-27T14-43-55-01a041f5-ff9d-7383-99de-8410947d6d52.jsonl`）；下列行号指 JSONL 原文件。
+
+早期 INTRA/SHM 建链失败保留；最终验收前重新构建四个入口：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 282 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT timeout 15s ./build/bin/test_hybrid_intra --gtest_color=no
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 298 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT timeout 25s ./build/bin/test_hybrid_shm_multiprocess --gtest_color=no
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 696 行）：
+
+```sh
+make -B -j2 test_transport_mode_selection test_hybrid_intra test_hybrid_shm_multiprocess test_rtps_same_host_multiprocess
+```
+
+15:19～15:20 顺序执行：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 704 行）：
+
+```sh
+./build/bin/test_transport_mode_selection --gtest_color=no
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 707 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT timeout 20s ./build/bin/test_hybrid_intra --gtest_color=no
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 711 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT timeout 25s ./build/bin/test_hybrid_shm_multiprocess --gtest_color=no
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 715 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT timeout 25s ./build/bin/test_rtps_same_host_multiprocess --gtest_color=no
+```
+
+最终模式选择 4 项、Hybrid INTRA 2 项、跨进程 Hybrid SHM 1 项、同机强制
+RTPS 1 项均通过，工具结果退出 0。早期 INTRA 等待回调和 SHM 交付曾失败；
+重编并修正 SHM sender identity 哈希接线后复验通过，不能把早期失败直接
+归因于所有环境或宣称所有旧二进制有效。自动 SHM 当时使用 XSI；模式选择
+里的不同 host 仅为元数据单元测试，RTPS 是同机显式强制后端，没有真实跨主机验证。
+结果保存在会话工具输出；运行日志的历史路径和迁移位置参见
+[统一日志目录](#2026-09-11-统一日志目录)。
+
+## 2026-08-30 RTPS 资源释放与动态订阅回归
+
+同一会话延续至 8 月 30 日，不能使用会话文件名中的 8 月 27 日作为本轮日期。
+分支 `dev`，完整测试时 HEAD 未单独保存；普通目录 `example/build`，无 sanitizer。
+
+关联提交：`9234c11`（2026-09-01）。来源：本地会话 `01a041f5-ff9d-7383-99de-8410947d6d52`
+（文件 `rollout-2026-08-27T14-43-55-01a041f5-ff9d-7383-99de-8410947d6d52.jsonl`）；下列行号指 JSONL 原文件。
+
+14:36 的完整相关目标构建与 14:38～14:39 的回归：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 1185 行）：
+
+```sh
+make -B -j2 publisher subscriber test_publisher_subscriber test_transport_mode_selection test_hybrid_intra test_hybrid_shm_multiprocess test_rtps_same_host_multiprocess test_hybrid_dynamic_intra test_hybrid_dynamic_shm_lifecycle test_rtps_lifecycle_regression test_shm_segment_robustness test_shm_dispatcher_robustness test_shm_transmitter_receiver
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 1201 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT timeout 25s ./build/bin/test_publisher_subscriber
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 1205 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT timeout 25s ./build/bin/test_hybrid_intra --gtest_color=no
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 1209 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT timeout 35s ./build/bin/test_hybrid_shm_multiprocess --gtest_color=no
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 1213 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT timeout 30s ./build/bin/test_rtps_same_host_multiprocess --gtest_color=no
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 1217 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT timeout 25s ./build/bin/test_hybrid_dynamic_intra --gtest_color=no
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 1220 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./build/bin/test_hybrid_dynamic_shm_lifecycle --gtest_color=no
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 1223 行）：
+
+```sh
+env CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./build/bin/test_rtps_lifecycle_regression --gtest_color=no
+```
+
+发布订阅 round-trip、Hybrid INTRA、跨进程自动 SHM、同机强制 RTPS、动态
+INTRA、动态 SHM 和 RTPS 生命周期均通过且退出 0。RTPS 生命周期 1 项，
+覆盖三轮 Subscriber 重连与 Writer Enable/Disable 幂等；这不是 ASan 泄漏检查。
+`test_hybrid_dynamic_intra` 是当时真实目标，9 月 6 日在 `00e3126` 中合并进
+`test_hybrid_intra`，不能照搬为当前构建入口。未单独重定向输出，原始结果在会话
+中；运行日志后续迁移参见[统一日志目录](#2026-09-11-统一日志目录)。
+
+## 2026-09-01 POSIX 修复与双后端基准
+
+分支 `dev`；开始时工作区干净且领先远端一个反向提交，关联前序
+`4e1e8a8`。使用默认 `example/build`、C++14 和本地 Fast DDS 2.12 安装；
+无 sanitizer。以下记录的是 POSIX 恢复并修复后的验证。
+
+关联提交：`06f373b`（2026-09-01）。来源：本地会话 `01a05d12-8b5e-7a91-8af5-8fa38a321cf5`
+（文件 `rollout-2026-09-01T21-04-51-01a05d12-8b5e-7a91-8af5-8fa38a321cf5.jsonl`）；下列行号指 JSONL 原文件。
+
+21:07 初次 POSIX 构建与运行：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 63 行）：
+
+```sh
+git diff --check
+git diff -- transport/shm/posix_segment.h transport/shm/posix_segment.cpp example/Makefile example/test_posix_segment_multiprocess.cpp
+make test_posix_segment_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 69 行）：
+
+```sh
+./build/bin/test_posix_segment_multiprocess
+ls -1 /dev/shm/cmw_* 2>/dev/null || true
+ipcs -m
+```
+
+Hybrid 首轮沙箱失败及沙箱外复验；Dispatcher/收发回归：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 81 行）：
+
+```sh
+sed -n '1,360p' example/test_hybrid_dynamic_shm_lifecycle.cpp
+sed -n '1,340p' example/test_rtps_same_host_multiprocess.cpp
+sed -n '1,220p' init.cpp
+sed -n '1,240p' config/conf_parse.cpp
+make test_hybrid_shm_multiprocess test_hybrid_dynamic_shm_lifecycle test_shm_transmitter_receiver test_shm_dispatcher_robustness
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 109 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_hybrid_shm_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 116 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_hybrid_shm_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 122 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_hybrid_dynamic_shm_lifecycle
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 130 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_shm_dispatcher_robustness
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_shm_transmitter_receiver
+```
+
+基准三次实际执行，以及补齐 Factory 用例后的最终回归：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 162 行）：
+
+```sh
+git diff --check
+make shm_segment_benchmark
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 168 行）：
+
+```sh
+./build/bin/shm_segment_benchmark
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 190 行）：
+
+```sh
+make shm_segment_benchmark && ./build/bin/shm_segment_benchmark
+git status --short --branch
+git diff --stat
+git diff --check
+git diff -- transport/shm/posix_segment.h transport/shm/posix_segment.cpp transport/shm/segment_factory.cpp example/Makefile example/test_posix_segment_multiprocess.cpp example/shm_segment_benchmark.cpp
+ls -1 /dev/shm/cmw_* 2>/dev/null || true
+ipcs -m
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 218 行）：
+
+```sh
+make shm_segment_benchmark && ./build/bin/shm_segment_benchmark
+ls -1 /dev/shm/cmw_* 2>/dev/null || true
+ipcs -m
+git diff --check
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 234 行）：
+
+```sh
+make test_posix_segment_multiprocess test_hybrid_shm_multiprocess test_hybrid_dynamic_shm_lifecycle && ./build/bin/test_posix_segment_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 240 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_hybrid_shm_multiprocess
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_hybrid_dynamic_shm_lifecycle
+```
+
+初次 POSIX 测试 1 项通过；增加 Factory 默认值检查后最终 2 项通过。Hybrid
+沙箱内报 `getifaddrs: Operation not permitted` 和 `open: Operation not permitted`，
+用例失败；沙箱外 Subscriber-first 和离开/重加入各 1 项通过，日志确认 `posix`。
+Dispatcher 的显式 XSI 回归及普通 SHM 收发恢复各 1 项通过。三次基准均完成
+POSIX/XSI 的 4 KiB、64 KiB、1 MiB、8 MiB 共 8 组，各组 `errors=0`。
+
+最后一次基准输出如下；前两次原始数值仍在会话第 170、192 行，不用最终数据
+覆盖它们。此为 Segment 层 VM 实验，不能与后来独立发布/订阅性能数据混用。
+
+| 后端 | 字节 | 迭代 | median latency μs | MiB/s | errors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| POSIX | 4096 | 20000 | 0.99 | 3930.68 | 0 |
+| XSI | 4096 | 20000 | 1.02 | 3845.70 | 0 |
+| POSIX | 65536 | 5000 | 4.48 | 13944.03 | 0 |
+| XSI | 65536 | 5000 | 4.38 | 14273.22 | 0 |
+| POSIX | 1048576 | 256 | 152.68 | 6549.63 | 0 |
+| XSI | 1048576 | 256 | 145.80 | 6858.65 | 0 |
+| POSIX | 8388608 | 32 | 3161.82 | 2530.19 | 0 |
+| XSI | 8388608 | 32 | 3410.28 | 2345.85 | 0 |
+
+结束时检查 `/dev/shm/cmw_*` 无残留、`ipcs -m` 无段。工具当时多只打印
+`r.output`，未保留各次 shell 数字退出码；以上通过结论依据 GTest 和基准输出。
+没有单独重定向基准日志，原始输出位于会话。
+
+## 2026-09-03 generation 与 Lease 首轮回归
+
+分支 `dev`，完整 HEAD 未单独保存；普通目录 `example/build`，未启用 sanitizer。
+这一轮为 Block generation、RAII Lease、布局检查和 Notifier 发布顺序验证。
+
+关联提交：`ab6a6c8`（2026-09-03）。来源：本地会话 `01a065f8-54f8-7830-b245-3a2c3b397dd1`
+（文件 `rollout-2026-09-03T14-32-48-01a065f8-54f8-7830-b245-3a2c3b397dd1.jsonl`）；下列行号指 JSONL 原文件。
+
+首次增量构建链接失败后强制重建；generation/Lease 通过：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 153 行）：
+
+```sh
+make -C example test_shm_segment_robustness test_posix_segment_multiprocess test_shm_dispatcher_robustness test_shm_transmitter_receiver
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 191 行）：
+
+```sh
+make -B -C example test_shm_block_lease_generation test_shm_segment_robustness test_posix_segment_multiprocess test_shm_dispatcher_robustness test_shm_transmitter_receiver
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 196 行）：
+
+```sh
+pgrep -af 'make -B -C example|g\+\+.*CyberRT' || true
+make -C example test_shm_block_lease_generation test_shm_segment_robustness test_posix_segment_multiprocess test_shm_dispatcher_robustness test_shm_transmitter_receiver
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 202 行）：
+
+```sh
+timeout 30s example/build/bin/test_shm_block_lease_generation
+status=$?
+printf 'test_shm_block_lease_generation exit=%s\n' "$status"
+exit "$status"
+```
+
+初次回归及修正后的定向复验：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 210 行）：
+
+```sh
+timeout 30s example/build/bin/test_shm_segment_robustness
+timeout 30s example/build/bin/test_posix_segment_multiprocess
+timeout 30s example/build/bin/test_shm_dispatcher_robustness
+timeout 45s example/build/bin/test_shm_transmitter_receiver
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 231 行）：
+
+```sh
+make -C example test_shm_block_lease_generation test_posix_segment_multiprocess test_shm_dispatcher_robustness test_shm_transmitter_receiver
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 237 行）：
+
+```sh
+timeout 30s example/build/bin/test_shm_block_lease_generation && timeout 30s example/build/bin/test_posix_segment_multiprocess && timeout 30s example/build/bin/test_shm_dispatcher_robustness && timeout 45s example/build/bin/test_shm_transmitter_receiver
+```
+
+Publisher/Hybrid 配置与建链诊断：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 287 行）：
+
+```sh
+make -C example test_publisher_subscriber test_hybrid_shm_multiprocess && timeout 45s example/build/bin/test_publisher_subscriber && timeout 45s example/build/bin/test_hybrid_shm_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 295 行）：
+
+```sh
+timeout 45s example/build/bin/test_publisher_subscriber && timeout 45s example/build/bin/test_hybrid_shm_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 319 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT timeout 45s example/build/bin/test_publisher_subscriber && CMW_PATH=/home/jim/cpp/CyberRT timeout 45s example/build/bin/test_hybrid_shm_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 340 行）：
+
+```sh
+unshare --user --map-root-user --ipc --fork /bin/bash -c 'CMW_PATH=/home/jim/cpp/CyberRT timeout 45s example/build/bin/test_hybrid_shm_multiprocess > /tmp/codex_hybrid_shm_isolated.log 2>&1'
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 422 行）：
+
+```sh
+printf '%s\n' '--- remaining POSIX CyberRT SHM ---'
+find /dev/shm -maxdepth 1 -type f -name 'cmw_*' -printf '%f %s bytes\n' | sort
+printf '%s\n' '--- remaining System V SHM ---'
+ipcs -m
+CMW_PATH=/home/jim/cpp/CyberRT timeout 45s example/build/bin/test_hybrid_shm_multiprocess > /tmp/codex_hybrid_shm_after_cleanup.log 2>&1
+task_hybrid_status=$?
+tail -n 140 /tmp/codex_hybrid_shm_after_cleanup.log
+printf 'test_hybrid_shm_multiprocess exit=%s\n' "$task_hybrid_status"
+exit "$task_hybrid_status"
+```
+
+首次 Dispatcher 链接失败，强制重编后完成构建。generation/Lease 3 项退出 0；
+Segment robustness 7 项通过。首轮 POSIX 双进程读检查失败，Dispatcher/收发
+程序曾 SIGSEGV；修正 Block 数组构造及测试所需布局后，POSIX 2 项、
+Dispatcher 1 项、收发恢复 1 项通过。
+Publisher/Subscriber 未设置 `CMW_PATH` 时配置打开失败并崩溃，设置后有通过
+结果；Hybrid 先遇到旧 Notifier 布局安全拒绝。隔离 IPC 及清理后仍出现
+`delivered == false`，不能记为通过。历史诊断日志为
+`/tmp/codex_hybrid_shm_isolated.log` 和 `/tmp/codex_hybrid_shm_after_cleanup.log`。
+当时清理了确认无人使用的旧项目 IPC；完整清理命令见会话第 395～466 行，
+不将针对当时 shmid 的清理脚本当作今天的操作指南。
+
+随后 Loan 阶段同名 Hybrid 测试成功，见[下一轮](#2026-09-03-loanedmessage-跨进程与背压回归)。
+两次聊天总结分别将 Hybrid 失败解释为 Discovery 或旧 IPC，证据不足以唯一
+确定根因；这里保留实际失败和后续成功，不采纳互相矛盾的归因。
+
+## 2026-09-03 LoanedMessage 跨进程与背压回归
+
+本轮实际执行在 9 月 3 日下午，提交日期为 9 月 5 日。分支 `dev`，完整
+测试时 HEAD 未单独保存；普通目录 `example/build`，无 sanitizer。
+
+关联提交：`73d8366`（2026-09-05）。来源：本地会话 `01a065f8-54f8-7830-b245-3a2c3b397dd1`
+（文件 `rollout-2026-09-03T14-32-48-01a065f8-54f8-7830-b245-3a2c3b397dd1.jsonl`）；下列行号指 JSONL 原文件。
+
+16:11 相关目标强制重建；16:13～16:14 普通 SHM 回归：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 799 行）：
+
+```sh
+make -B test_shm_loaned_message test_shm_loaned_message_multiprocess test_shm_block_lease_generation test_shm_segment_robustness test_posix_segment_multiprocess test_shm_dispatcher_robustness test_shm_transmitter_receiver test_publisher_subscriber test_hybrid_shm_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 824 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_shm_block_lease_generation
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 828 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_shm_segment_robustness
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 832 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_posix_segment_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 836 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_shm_dispatcher_robustness
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 842 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_shm_transmitter_receiver
+```
+
+Loan 两个入口及后续最终单进程回归：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 729 行）：
+
+```sh
+make test_shm_loaned_message test_shm_loaned_message_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 781 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_shm_loaned_message
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 787 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_shm_loaned_message_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 1113 行）：
+
+```sh
+make test_shm_loaned_message && CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_shm_loaned_message
+```
+
+重新构建普通发布订阅目标并复验 Hybrid：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 934 行）：
+
+```sh
+make -B /home/jim/cpp/CyberRT/example/build/obj/example/test_hybrid_shm_multiprocess.o
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 934 行）：
+
+```sh
+make -B /home/jim/cpp/CyberRT/example/build/obj/example/test_publisher_subscriber.o
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 941 行）：
+
+```sh
+make test_hybrid_shm_multiprocess test_publisher_subscriber
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 954 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_hybrid_shm_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 960 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_publisher_subscriber
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 1007 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT ./build/bin/test_hybrid_shm_multiprocess
+```
+
+最终单进程 Loan 5/5、跨进程 Loan 1/1；generation/Lease 3、Segment 7、
+POSIX 2、Dispatcher 1、收发恢复 1 项有通过结果。跨进程用例验证持有
+只读 View 时原块不可复用、耗尽后 Acquire 有界失败、释放最后引用后恢复。
+16:19 和 16:25 的 Hybrid 各 1 项通过；发布订阅输出 serialization round-trip PASS。
+这轮仍是当时 SHM 专用 Loan 能力，不能扩展为混合路由、RTPS 或跨主机验证。
+上述五个普通 SHM 回归均保存退出 0；Loan 早期调用的工具输出存在截断，
+未逐条恢复完整数字退出码，最终 5/5 与跨进程 1/1 以 GTest 输出核对。没有单独重定向测试输出，
+日志来源为会话；前轮失败仍保留在上一节。
+
+## 2026-09-05 LoanedMessage 混合传输首轮验证
+
+分支 `dev`，完整 HEAD 未单独保存；普通 `example/build`，无 sanitizer。
+实际执行日期取工具时间 9 月 5 日，不取提交标题中的 9.3。
+
+关联提交：`4d837c2`（2026-09-05，提交标题写作 9.3）。来源：本地会话 `01a07005-fd9b-7380-9070-47b9ea791af2`
+（文件 `rollout-2026-09-05T13-23-55-01a07005-fd9b-7380-9070-47b9ea791af2.jsonl`）；下列行号指 JSONL 原文件。
+
+Hybrid 首轮失败、重建与最后复验：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 252 行）：
+
+```sh
+make test_loaned_message_hybrid test_loaned_message_rtps_multiprocess -j2
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 258 行）：
+
+```sh
+CMW_PATH="$(cd .. && pwd)" ./build/bin/test_loaned_message_hybrid
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 270 行）：
+
+```sh
+make test_loaned_message_hybrid -j2 && CMW_PATH="$(cd .. && pwd)" ./build/bin/test_loaned_message_hybrid
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 282 行）：
+
+```sh
+make test_loaned_message_hybrid -B -j2 && CMW_PATH="$(cd .. && pwd)" ./build/bin/test_loaned_message_hybrid
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 461 行）：
+
+```sh
+make test_loaned_message_hybrid -j2 && CMW_PATH="$(cd .. && pwd)" ./build/bin/test_loaned_message_hybrid > /tmp/cyberrt_hybrid_final.log 2>&1; result=$?; tail -20 /tmp/cyberrt_hybrid_final.log; exit $result
+```
+
+同机强制 RTPS 执行和早期 quick benchmark：
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 328 行）：
+
+```sh
+CMW_PATH="$(cd .. && pwd)" ./build/bin/test_loaned_message_rtps_multiprocess
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 310 行）：
+
+```sh
+make shm_zero_copy_benchmark -j2
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 322 行）：
+
+```sh
+make shm_zero_copy_benchmark -j2
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 337 行）：
+
+```sh
+CMW_PATH="$(cd .. && pwd)" ./build/bin/shm_zero_copy_benchmark --quick
+```
+
+工作目录 `/home/jim/cpp/CyberRT/example`（会话第 369 行）：
+
+```sh
+make shm_zero_copy_benchmark -j2 && CMW_PATH="$(cd .. && pwd)" ./build/bin/shm_zero_copy_benchmark --quick > /tmp/cyberrt_benchmark_quick.log 2>&1; result=$?; tail -80 /tmp/cyberrt_benchmark_quick.log; exit $result
+```
+
+Hybrid 早期两个版本的断言失败，强制重编及测试调整后最终 1 项通过；
+`/tmp/cyberrt_hybrid_final.log` 保存最后输出。RTPS 的畸形长度检查 1 项通过，
+跨进程往返 1 项因网络权限异常失败，整个程序不能记为通过；9 月 6 日的
+后续修复另行记录。quick benchmark 曾因缺少匹配的 `Transmit` 重载编译失败，
+修正后运行，输出保存至 `/tmp/cyberrt_benchmark_quick.log`。
+`shm_zero_copy_benchmark` 为历史目标，后续在 `3c128c3` 中被独立进程实验
+替代；quick 输出不能当成独立 Publisher/Subscriber 的正式性能结论，
+这里不补写吞吐提升比例。
+
+## 2026-09-05 元数据对齐与发送生命周期回归
+
+分支 `dev`，完整测试时 HEAD 未单独保存；普通目录 `example/build`。
+Sanitizer 通过显式 `CXXFLAGS`/`LDFLAGS` 配置，不能替换成今天的 `SANITIZE=` 示例。
+
+关联提交：`11b0e1a`（2026-09-05）。来源：本地会话 `01a0707d-3ce3-71b1-aba4-d25ea5e7f1b9`
+（文件 `rollout-2026-09-05T15-34-10-01a0707d-3ce3-71b1-aba4-d25ea5e7f1b9.jsonl`）；下列行号指 JSONL 原文件。
+
+生命周期测试首轮失败与复验：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 84 行）：
+
+```sh
+make -C example test_shm_transmitter_lifecycle_regression -j4
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 90 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_shm_transmitter_lifecycle_regression
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 95 行）：
+
+```sh
+make -C example test_shm_transmitter_lifecycle_regression -j4 && CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_shm_transmitter_lifecycle_regression > /tmp/shm_transmitter_lifecycle_regression.log 2>&1; status=$?; tail -80 /tmp/shm_transmitter_lifecycle_regression.log; exit $status
+```
+
+动态 SHM 首次构建失败、重建及运行：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 105 行）：
+
+```sh
+make -C example test_loaned_message_dynamic_shm_lifecycle -j4
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 111 行）：
+
+```sh
+make -C example test_loaned_message_dynamic_shm_lifecycle -j4
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 117 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT timeout 35s ./example/build/bin/test_loaned_message_dynamic_shm_lifecycle > /tmp/loaned_dynamic_shm.log 2>&1; status=$?; tail -100 /tmp/loaned_dynamic_shm.log; exit $status
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 124 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT timeout 35s ./example/build/bin/test_loaned_message_dynamic_shm_lifecycle > /tmp/loaned_dynamic_shm.log 2>&1; status=$?; tail -100 /tmp/loaned_dynamic_shm.log; exit $status
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 146 行）：
+
+```sh
+make -C example test_loaned_message_dynamic_shm_lifecycle -j4 && CMW_PATH=/home/jim/cpp/CyberRT timeout 35s ./example/build/bin/test_loaned_message_dynamic_shm_lifecycle > /tmp/loaned_dynamic_shm.log 2>&1; status=$?; tail -100 /tmp/loaned_dynamic_shm.log; exit $status
+```
+
+相关构建失败和最终三个普通回归：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 154 行）：
+
+```sh
+make -C example -B test_shm_loaned_message test_loaned_message_hybrid test_shm_transmitter_receiver test_hybrid_dynamic_shm_lifecycle -j4 > /tmp/cyberrt-related-build.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_shm_loaned_message > /tmp/test_shm_loaned.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_loaned_message_hybrid > /tmp/test_loaned_hybrid.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_shm_transmitter_receiver > /tmp/test_shm_tx_rx.log 2>&1; status=$?; tail -20 /tmp/cyberrt-related-build.log; tail -20 /tmp/test_shm_loaned.log; tail -20 /tmp/test_loaned_hybrid.log; tail -20 /tmp/test_shm_tx_rx.log; exit $status
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 164 行）：
+
+```sh
+make -C example -B test_shm_loaned_message test_loaned_message_hybrid test_shm_transmitter_receiver -j4 > /tmp/cyberrt-related-build.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_shm_loaned_message > /tmp/test_shm_loaned.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_loaned_message_hybrid > /tmp/test_loaned_hybrid.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_shm_transmitter_receiver > /tmp/test_shm_tx_rx.log 2>&1; status=$?; tail -8 /tmp/cyberrt-related-build.log; tail -10 /tmp/test_shm_loaned.log; tail -10 /tmp/test_loaned_hybrid.log; tail -10 /tmp/test_shm_tx_rx.log; exit $status
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 172 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_shm_loaned_message > /tmp/test_shm_loaned.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_loaned_message_hybrid > /tmp/test_loaned_hybrid.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_shm_transmitter_receiver > /tmp/test_shm_tx_rx.log 2>&1; status=$?; tail -12 /tmp/test_shm_loaned.log; tail -12 /tmp/test_loaned_hybrid.log; tail -12 /tmp/test_shm_tx_rx.log; exit $status
+```
+
+UBSan 首轮及改用显式 MessageInfo 重载后的复验；TSan 尝试：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 177 行）：
+
+```sh
+make -C example BUILD_DIR=/tmp/cyberrt-ubsan CXXFLAGS='-std=c++14 -g -fsanitize=undefined -fno-sanitize-recover=all' LDFLAGS='-L/home/jim/cpp/fastdds_2.12/install/lib -Wl,-rpath,/home/jim/cpp/fastdds_2.12/install/lib -fsanitize=undefined' test_shm_transmitter_lifecycle_regression -j4 > /tmp/cyberrt-ubsan-build.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1' timeout 45s /tmp/cyberrt-ubsan/bin/test_shm_transmitter_lifecycle_regression > /tmp/cyberrt-ubsan-run.log 2>&1; status=$?; tail -18 /tmp/cyberrt-ubsan-build.log; tail -40 /tmp/cyberrt-ubsan-run.log; exit $status
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 182 行）：
+
+```sh
+make -C example BUILD_DIR=/tmp/cyberrt-ubsan CXXFLAGS='-std=c++14 -g -fsanitize=undefined -fno-sanitize-recover=all' LDFLAGS='-L/home/jim/cpp/fastdds_2.12/install/lib -Wl,-rpath,/home/jim/cpp/fastdds_2.12/install/lib -fsanitize=undefined' test_shm_transmitter_lifecycle_regression -j4 > /tmp/cyberrt-ubsan-build.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1' timeout 45s /tmp/cyberrt-ubsan/bin/test_shm_transmitter_lifecycle_regression > /tmp/cyberrt-ubsan-run.log 2>&1; status=$?; tail -40 /tmp/cyberrt-ubsan-run.log; exit $status
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 188 行）：
+
+```sh
+make -C example BUILD_DIR=/tmp/cyberrt-tsan CXXFLAGS='-std=c++14 -g -fsanitize=thread -fno-omit-frame-pointer' LDFLAGS='-L/home/jim/cpp/fastdds_2.12/install/lib -Wl,-rpath,/home/jim/cpp/fastdds_2.12/install/lib -fsanitize=thread' test_shm_transmitter_lifecycle_regression -j4 > /tmp/cyberrt-tsan-build.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT TSAN_OPTIONS='halt_on_error=1:second_deadlock_stack=1' timeout 45s /tmp/cyberrt-tsan/bin/test_shm_transmitter_lifecycle_regression --gtest_filter='ShmTransmitterLifecycleRegression.SendAndEnableDisableDoNotRace:ShmTransmitterLifecycleRegression.HeapLoanSendsAcrossShmLifecycleRace' > /tmp/cyberrt-tsan-run.log 2>&1; status=$?; tail -25 /tmp/cyberrt-tsan-build.log; tail -60 /tmp/cyberrt-tsan-run.log; exit $status
+```
+
+最后普通构建与生命周期复验：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 195 行）：
+
+```sh
+make -C example -B test_shm_transmitter_lifecycle_regression test_loaned_message_dynamic_shm_lifecycle -j4 > /tmp/cyberrt-final-build.log 2>&1 && CMW_PATH=/home/jim/cpp/CyberRT timeout 45s ./example/build/bin/test_shm_transmitter_lifecycle_regression > /tmp/cyberrt-final-lifecycle.log 2>&1; status=$?; tail -12 /tmp/cyberrt-final-build.log; tail -18 /tmp/cyberrt-final-lifecycle.log; git diff --check; git status --short; exit $status
+```
+
+生命周期首轮 2 过/2 失败，调整测试后 4/4 通过；最终普通复验仍为 4/4。
+动态 SHM 先因 LoanedMessage 默认构造缺失编译失败，补齐后沙箱运行报网络权限
+错误；沙箱外重跑还经历等待问题，修正编排后的 1 项通过。
+相关全构建中普通 Hybrid 消息曾触发 Loan 模板实例化错误；缩小到三个指定
+目标后，沙箱内 `test_shm_loaned_message` 仍 SIGSEGV，沙箱外最终
+Loan 5 项、Hybrid 1 项、普通 SHM 收发 1 项通过。不能把缩小后的通过写成
+原四目标构建全部通过。
+
+UBSan 首轮报 `PerfEventCache` 的 64 字节对齐错误。第二轮测试改用显式
+`MessageInfo` 的发送重载，绕开该计数路径后 4 项通过；当时没有修复
+PerfEventCache，故只算该重载下的定向验证。全发送路径的 `-faligned-new`
+修复和完整 UBSan 回归见[9 月 10 日记录](#2026-09-10-发送端生命周期同步)。
+TSan 在进入用例前报 `unexpected memory mapping`，未通过。
+
+历史日志路径见各命令的 `/tmp/*.log`，包括
+`/tmp/shm_transmitter_lifecycle_regression.log`、`/tmp/loaned_dynamic_shm.log`、
+`/tmp/cyberrt-ubsan-run.log` 和 `/tmp/cyberrt-tsan-run.log`。当时同名重定向
+可能已覆盖前次文件；失败的不可替代证据为聊天工具输出，不能声称磁盘还保存
+每次日志。本轮数字退出码未全部随 `r.output` 保存，按输出区分通过、失败及未启动。
+
+## 2026-09-06 测试集整理与首轮失败
+
+分支 `dev`；工作区在 `11b0e1a` 之后继续修改，未单独保存本轮完整 HEAD。
+普通构建目录为 `example/build`；本轮先整理测试入口及清理路径，后续才处理
+运行时和旧构建问题，不能将同一提交的最终状态套在本轮失败上。
+
+关联提交：`00e3126`（2026-09-06，同时包含后续修复）。来源：本地会话 `01a0756e-d46d-7c61-a0e4-064837f2bd1f`
+（文件 `rollout-2026-09-06T14-36-32-01a0756e-d46d-7c61-a0e4-064837f2bd1f.jsonl`）；下列行号指 JSONL 原文件。
+
+四个整理后的入口先在沙箱内执行，再在沙箱外执行：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 207 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT bash example/run_tests.sh --bin-dir /home/jim/cpp/CyberRT/example/build/bin --timeout 30 test_blocker test_node test_publisher_subscriber test_hybrid_intra
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 214 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT bash example/run_tests.sh --bin-dir /home/jim/cpp/CyberRT/example/build/bin --timeout 30 test_blocker test_node test_publisher_subscriber test_hybrid_intra
+```
+
+runner 非零与超时验证：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 354 行）：
+
+```sh
+chmod +x example/.run_tests_nonzero_fixture.sh example/.run_tests_timeout_fixture.sh
+set +e
+example/run_tests.sh --bin-dir "$(pwd)/example" --timeout 1 .run_tests_nonzero_fixture.sh .run_tests_timeout_fixture.sh
+runner_status=$?
+set -e
+printf 'fixture-runner-status=%s\n' "$runner_status"
+test "$runner_status" -ne 0
+```
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 359 行）：
+
+```sh
+chmod +x example/run_tests.sh
+set +e
+example/run_tests.sh --bin-dir "$(pwd)/example" --timeout 1 .run_tests_nonzero_fixture.sh .run_tests_timeout_fixture.sh
+runner_status=$?
+set -e
+printf 'fixture-runner-status=%s\n' "$runner_status"
+test "$runner_status" -ne 0
+```
+
+清理路径修正后，15:17 的完整实际 check：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 557 行）：
+
+```sh
+set +e
+CMW_PATH=/home/jim/cpp/CyberRT make -C example -j4 check > /tmp/cyberrt-final-check-after-cleanup.log 2>&1
+check_status=$?
+set -e
+printf '%s\n' '--- check summary ---'
+rg -n "^\[PASS\]|^\[FAIL\]|^\[TIME\]|^Test runner summary:|^  (passed|failed|timed out):|^check:" /tmp/cyberrt-final-check-after-cleanup.log || true
+printf 'make-check-status=%s\n' "$check_status"
+test "$check_status" -ne 0
+```
+
+四入口沙箱运行汇总 `passed=1 failed=3 timed_out=0`。临时 fixture 内容为
+`.run_tests_nonzero_fixture.sh` 执行 `exit 7`、`.run_tests_timeout_fixture.sh`
+执行 `sleep 5`；第一次 runner 无执行权限，补 `chmod +x` 后得到
+`passed=0 failed=1 timed_out=1`、runner 返回 1，随后移除两个 fixture。
+这证明失败检测生效，不能计为中间件程序通过。
+
+完整 check 在先前若干 Node/Publisher 清理超时修正后，fast 13/13 通过、
+integration 6/8 通过；SHM Loan 跨进程和 RTPS Loan 跨进程均 SIGSEGV，
+`make-check-status=2`。上面包装命令最后检查非零是否符合预期，因此包装
+shell 自身可以返回 0，不能据此宣称 `make check` 通过。
+早期完整 check 还有 fast 12 过/1 超时、integration 5 过/3 失败，
+保存在 `/tmp/cyberrt-final-check.log`（会话第 417、447 行）；15:17 结果
+为 `/tmp/cyberrt-final-check-after-cleanup.log`（第 557、581 行）。
+修复后的新目录复验见[下一轮](#2026-09-06-独立构建与-loan-崩溃修复复验)。
+
+## 2026-09-06 独立构建与 Loan 崩溃修复复验
+
+同一 `dev` 工作区后续验证；独立普通目录分别为
+`/tmp/cyberrt-loaned-fixed-20260906`、`/tmp/cyberrt-final-20260906`，
+ASan+UBSan 为 `/tmp/cyberrt-loaned-asan-20260906`。使用本地 GCC/C++14
+及 `/home/jim/cpp/fastdds_2.12/install`，未重编 Fast DDS 依赖。
+
+关联提交：`00e3126`（2026-09-06）。来源：本地会话 `01a0756e-d46d-7c61-a0e4-064837f2bd1f`
+（文件 `rollout-2026-09-06T14-36-32-01a0756e-d46d-7c61-a0e4-064837f2bd1f.jsonl`）；下列行号指 JSONL 原文件。
+
+16:13 前后的独立目录完整 check 使用脱离工具终端的执行方式保存退出状态：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 1131 行）：
+
+```sh
+test ! -e /tmp/cyberrt-full-check-complete-20260906.status && setsid bash -c 'CMW_PATH=/home/jim/cpp/CyberRT make -s -C /home/jim/cpp/CyberRT/example BUILD_DIR=/tmp/cyberrt-loaned-fixed-20260906 -j4 check > /tmp/cyberrt-full-check-complete-20260906.log 2>&1; printf "%s\n" "$?" > /tmp/cyberrt-full-check-complete-20260906.status' >/dev/null 2>&1 &
+```
+
+随后最终源码另开新目录构建并检查：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 1285 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT make -C example BUILD_DIR=/tmp/cyberrt-final-20260906 -j4 check > /tmp/cyberrt-final-check-20260906.log 2>&1; status=$?; printf '%s\n' "$status" > /tmp/cyberrt-final-check-20260906.status; exit "$status"
+```
+
+22:27 修复 runner 对 zombie 的误判后重跑完整 check：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 1347 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT make -s -C example BUILD_DIR=/tmp/cyberrt-final-20260906 -j4 check
+```
+
+22:28 两个原崩溃入口的 ASan+UBSan 复验：
+
+工作目录 `/home/jim/cpp/CyberRT`（会话第 1359 行）：
+
+```sh
+CMW_PATH=/home/jim/cpp/CyberRT make -s -C example BUILD_DIR=/tmp/cyberrt-loaned-asan-20260906 -j4 CXXFLAGS='-std=c++14 -g -O1 -MMD -MP -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-L/home/jim/cpp/fastdds_2.12/install/lib -Wl,-rpath,/home/jim/cpp/fastdds_2.12/install/lib -fsanitize=address,undefined' test_shm_loaned_message_multiprocess test_loaned_message_rtps_multiprocess && CMW_PATH=/home/jim/cpp/CyberRT ASAN_OPTIONS='halt_on_error=1:detect_leaks=1' UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1' bash example/run_tests.sh --bin-dir /tmp/cyberrt-loaned-asan-20260906/bin --timeout 90 test_shm_loaned_message_multiprocess test_loaned_message_rtps_multiprocess
+```
+
+早期 SIGSEGV 随独立重编消失，Makefile 增加头文件依赖跟踪；同时诊断出
+ReadableInfo 跨进程 vptr 和 RTPS Loan 实收尾部零填充问题，分别修正。
+普通消息实例化 Loan 专用模板的问题用 C++14 tag dispatch 处理，删除测试
+兼容头；动态 SHM 用例增加 Discovery 异步匹配等待。
+
+第一组独立完整 check 的 `/tmp/cyberrt-full-check-complete-20260906.log`
+在会话第 1166 行显示 fast 13/13、integration 8/8，无失败或超时；
+对应 `.status` 保存退出状态。之后进一步调整测试源码再跑出现过失败，
+不能用这次成功覆盖后面的尝试。新目录曾受 runner 把 zombie 当存活进程的
+错误影响，最终改为 watchdog + wait。22:27 会话收尾报告完整 check
+13 fast + 8 integration 通过，但第 1354 行工具输出截断，未保留完整尾部
+及数字退出码；此项明确为历史收尾报告，不能当作本次重新验证的结果。
+
+22:28 sanitizer 输出直接保存 `passed=2 failed=0 timed_out=0`：
+SHM Loan 跨进程 1 项、RTPS Loan 2 项通过，开启 `detect_leaks=1`，没有
+ASan/UBSan 报告。只验证这两个程序，不代表全套 sanitizer 通过，RTPS
+仍为同机强制后端。最后两条命令没有文件重定向，证据在聊天工具输出；
+其它历史日志和状态文件路径保持上述实际值。
 
 ## 2026-09-10 首轮验证
 
