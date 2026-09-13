@@ -149,6 +149,11 @@ bool Manager::CreateReader(RtpsParticipant* participant){
     AttributesFiller::FillInReaderAttr(
                 channel_name_ , QosProfileConf::QOS_PROFILE_TOPO_CHANGE , &reader_attr);
 
+    // registerReader advertises QoS but does not configure the RTPS endpoint.
+    // Discovery needs the reliable, durable reader promised by TOPO_CHANGE.
+    reader_attr.ratt.endpoint.reliabilityKind = RELIABLE;
+    reader_attr.ratt.endpoint.durabilityKind = TRANSIENT_LOCAL;
+
     listener_ = new ReaderListener(
             std::bind(&Manager::OnRemoteChange, this , std::placeholders::_1));
     eprosima::fastrtps::rtps::ReaderHistory* mp_history = new ReaderHistory(reader_attr.hatt);
@@ -166,6 +171,11 @@ bool Manager::CreateWriter(RtpsParticipant* participant){
     // 填充 RtpsWriter 的配置信息
     AttributesFiller::FillInWriterAttr(
         channel_name_, QosProfileConf::QOS_PROFILE_TOPO_CHANGE,&writer_attr);
+
+    // Keep old topology announcements available to newly started processes.
+    // Apply TOPO_CHANGE to the actual endpoint as well as the advertised QoS.
+    writer_attr.watt.endpoint.reliabilityKind = RELIABLE;
+    writer_attr.watt.endpoint.durabilityKind = TRANSIENT_LOCAL;
     
     //创建rtps writer history
     writer_history_ = new WriterHistory(writer_attr.hatt);

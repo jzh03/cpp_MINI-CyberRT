@@ -25,11 +25,17 @@ class IntraTransmitter : public Transmitter<M> {
 
   void Enable() override {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+#ifdef CMW_DEMO_ROUTE_TRACE
+    if (!this->enabled_) CMW_DEMO_ROUTE_TRACE("INTRA", true, this->attr_.channel_name);
+#endif
     this->enabled_ = true;
   }
 
   void Disable() override {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+#ifdef CMW_DEMO_ROUTE_TRACE
+    if (this->enabled_) CMW_DEMO_ROUTE_TRACE("INTRA", false, this->attr_.channel_name);
+#endif
     this->enabled_ = false;
   }
 

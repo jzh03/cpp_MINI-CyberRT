@@ -130,6 +130,9 @@ void RtpsTransmitter<M>::Enable(){
     if(reg)
     {
       this->enabled_ = true;
+#ifdef CMW_DEMO_ROUTE_TRACE
+      CMW_DEMO_ROUTE_TRACE("RTPS", true, this->attr_.channel_name);
+#endif
     } else {
       RTPSDomain::removeRTPSWriter(rtps_writer);
       rtps_writer = nullptr;
@@ -153,6 +156,9 @@ void RtpsTransmitter<M>::Disable() {
     delete mp_history;
     mp_history = nullptr;
   }
+#ifdef CMW_DEMO_ROUTE_TRACE
+  if (this->enabled_) CMW_DEMO_ROUTE_TRACE("RTPS", false, this->attr_.channel_name);
+#endif
   this->enabled_ = false;
 }
 

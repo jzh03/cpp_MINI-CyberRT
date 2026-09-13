@@ -5,6 +5,20 @@
 功能性更新见 [README](../README.md)，文档职责见 [AGENTS.md](../AGENTS.md)。
 历史条目未给出完整命令的部分保留原记录，不将使用指南中的示例补写为已执行命令。
 
+## 查找记录
+
+本页是实际执行档案，命令和失败历史按原样保留。要复制命令重新操作，请先看 [测试指南](TESTING.md) 或 [Demo 指南](demo/README.md)。
+
+| 想查什么 | 记录入口 |
+| --- | --- |
+| 面试 Demo、两轮完整运行、4 MiB、Ctrl+C | [2026-09-12 Demo 验收](#2026-09-12-面试通信-demo-本地验收) |
+| SHM 性能三轮数据与统计口径 | [2026-09-11 性能实验](#2026-09-11-独立进程-shm-性能实验) |
+| Notifier 并发、丢弃和 sanitizer | [2026-09-11 Notifier 回归](#2026-09-11-notifier-发布短锁槽位互斥及丢弃策略) |
+| 日志目录与路径检查 | [2026-09-11 日志目录](#2026-09-11-统一日志目录) |
+| 生命周期同步与重入 | [2026-09-10 生命周期](#2026-09-10-发送端生命周期同步) |
+| 早期共享内存验证和环境失败 | [2026-09-10 首轮](#2026-09-10-首轮验证)、[后续复跑](#2026-09-10-2001-后续复跑) |
+| 本次文档整理检查 | [2026-09-13 文档整理](#2026-09-13-文档可读性整理) |
+
 ## 2026-09-10 首轮验证
 
 分支为 `dev`，起始 HEAD 为 `00e3126`。
@@ -816,3 +830,397 @@ git status --short
 
 最终复算、哈希、链接、入口和空白检查退出 0。结果保留在工作区，未提交、推送；
 原失败、短测和正式结果分别归档，没有替换失败记录或抽掉低吞吐轮次。
+
+## 2026-09-12 面试通信 Demo 本地验收
+
+工作目录 `/home/jim/cpp/CyberRT`；分支 `dev`，起始 HEAD
+`3c128c37fbc1e5359f6ddb5f185ea5dcd5dfe50e`，开始时 `git status --short` 为空。
+Ubuntu 22.04 虚拟机，内核 `6.8.0-138-generic`，x86_64，g++ 11.4.0；Fast DDS
+`/home/jim/cpp/fastdds_2.12/install`。新增独立构建目录
+`/home/jim/cpp/CyberRT/example/demo/build`，最终编译选项 C++14、`-faligned-new -O2 -g0`，
+未启用 sanitizer。本次不运行完整回归或 benchmark。
+
+按本次用户明确要求，Demo 构建输出、原始角色输出和归档放在 `example/demo/runs/`，
+该目录已忽略。运行库 Logger 仍按原规则先写根目录 `log/`，脚本在每个进程退出后将
+其确切文件原样移到本轮 `*.runtime.log`；原路径和迁移位置记录在每轮 `commands.txt`。
+这项 Demo 专用归档不改变其他程序的日志规则。使用指南见 [Demo README](demo/README.md)。
+
+### 构建与环境失败，均保留
+
+以下命令实际从上述工作目录执行：
+
+```bash
+mkdir -p example/demo/runs/dev-build
+make -C example -f demo/Makefile -j2 demo-transport > example/demo/runs/dev-build/build.log 2>&1
+g++ -std=c++14 -faligned-new -fsyntax-only -DCMW_PROJECT_ROOT='"/home/jim/cpp/CyberRT"' -Iexample/demo/build/include -Ithirdparty -I/home/jim/cpp/fastdds_2.12/install/include -include example/demo/trace.h example/demo/demo_transport.cpp > example/demo/runs/dev-build/syntax.log 2>&1
+```
+
+首次构建退出 2，根分区只剩约 2.7 MiB，编译器写对象/临时汇编时报 ENOSPC；不是程序
+测试失败。单独语法检查退出 0。用户随后明确授权清理虚拟机中可以清理的文件；只删除
+下列旧临时构建目录的 `obj/` 内普通 `.o` 和 `.d` 文件，未删源码、程序或日志。
+实际执行的清理命令：
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+roots = [Path('/tmp') / name for name in ['cyberrt-lifecycle-normal', 'cyberrt-lifecycle-ubsan', 'cyberrt-notifier-normal', 'cyberrt-notifier-address', 'cyberrt-notifier-undefined']]
+count = total = 0
+with open('example/demo/runs/dev-build/space-cleanup.txt', 'w') as log:
+    for root in roots:
+        for p in (root / 'obj').rglob('*'):
+            if p.is_file() and not p.is_symlink() and p.suffix in ('.o', '.d'):
+                size = p.stat().st_size
+                log.write(f'{p}\t{size}\n')
+                p.unlink()
+                count += 1
+                total += size
+    log.write(f'files={count} bytes={total}\n')
+print(f'Removed {count} old temporary object/dependency files; {total} bytes')
+PY
+df -h .
+make -C example -f demo/Makefile -j2 demo-transport > example/demo/runs/dev-build/build-retry.log 2>&1
+```
+
+清理退出 0，共 855 个文件、993624506 bytes，清单在 `space-cleanup.txt`。
+第二次构建退出 2：force-include 的诊断头进入 `.S` 编译，找不到 `cstdio`。
+增加 `__ASSEMBLER__` 保护后，实际复验：
+
+```bash
+make -C example -f demo/Makefile -j2 demo-transport > example/demo/runs/dev-build/build-assembler-fix.log 2>&1
+./example/demo/run_demo.sh all --seconds 3 --no-build > example/demo/runs/dev-build/short-all-console.log 2>&1
+```
+
+构建退出 0。首轮短测退出 1；A 通过，B 发送失败。原始目录
+`example/demo/runs/20260912-164545-Rmm6kA/` 的 `B_pub.runtime.log` 记录
+`incompatible notifier shm layout`：宿主遗留 key `0x31c7e6c9`、shmid `19`、
+196616 bytes 的旧通知区与当前实现不兼容。B 首条未收到，C～E 未执行，不能写成通过。
+没有删除或修改该宿主通知区。实际隔离能力检查：
+
+```bash
+unshare --user --map-root-user --ipc sh -c 'id; ipcs -m' > example/demo/runs/dev-build/ipc-probe.log 2>&1
+cat example/demo/runs/dev-build/ipc-probe.log
+ipcs -m
+make -C example -f demo/Makefile -j2 demo-transport > example/demo/runs/dev-build/build-qos-fix.log 2>&1
+./example/demo/run_demo.sh all --seconds 3 --no-build > example/demo/runs/dev-build/short-isolated-console.log 2>&1
+```
+
+IPC probe 退出 0，独立 namespace 内无旧通知区，宿主旧通知区不变。
+脚本随后自动进入独立 user/IPC namespace，保留原网络 namespace；普通 QoS depth
+使用 16，Loan 的 Blocker history 使用 0；构建退出 0。
+第二轮短测退出 1，原始目录 `example/demo/runs/20260912-164730-oqIxeu/`：A/B/C 通过，
+D 第一订阅端通过且真实 OFFLINE/SHM DISABLED 被观察到，但全新 D_sub2 进程未收消息，
+20 秒超时；E 未执行。发布端重新匹配并 ENABLED，发送仍成功，证明不能把发送成功当送达。
+
+Demo 层修复：仅 D 在观察到真实非空订阅者集合变化后，读取本 Node 已登记的 Writer
+完整属性，用现有 `ChannelManager::Join(writer, ROLE_WRITER)` 重新公告仍在线的发布端。
+不重启 Publisher、不伪造 reader/host、不修改核心 Discovery。后续 D 的通过结论均以
+这个明确输出的 `REANNOUNCE_LIVE_WRITER` 为前提，不宣称原生无条件新进程自动恢复。
+
+```bash
+make -C example -f demo/Makefile -j2 demo-transport > example/demo/runs/dev-build/build-reannounce.log 2>&1
+./example/demo/run_demo.sh all --seconds 3 --no-build > example/demo/runs/dev-build/short-reannounce-console.log 2>&1
+```
+
+构建和短测均退出 0，原始目录 `example/demo/runs/20260912-164932-Y8jWB4/`。
+A～E 全部满足真实后端事件、有效接收、连续 10 条和进程退出检查；D 同一发布 PID
+`362621`，重新加入后首序号 `44`，大于前一订阅者末序号 `31`。
+完整命令含频道、Payload、频率、时长、PID、wait 状态见该轮 `commands.txt`。
+
+双终端进入同一 namespace 的说明也实际检查过（退出 0），命令如下；结果保存为
+`example/demo/runs/dev-build/manual-namespace-probe.txt`：
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import subprocess
+p = subprocess.Popen(['unshare', '--user', '--map-root-user', '--ipc', 'sh', '-c', 'readlink /proc/self/ns/ipc; read reply'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+try:
+    expected = p.stdout.readline().strip()
+    r = subprocess.run(['nsenter', '--target', str(p.pid), '--user', '--ipc', '--preserve-credentials', 'readlink', '/proc/self/ns/ipc'], capture_output=True, text=True)
+    result = f'target_pid={p.pid} expected={expected} exit={r.returncode} stdout={r.stdout} stderr={r.stderr}'
+    Path('example/demo/runs/dev-build/manual-namespace-probe.txt').write_text(result)
+    print(result)
+    assert r.returncode == 0 and r.stdout.strip() == expected
+finally:
+    p.communicate('exit\n', timeout=5)
+PY
+```
+
+### 默认完整流程与最终检查
+
+默认两轮连续运行的实际命令：
+
+```bash
+for round in 1 2; do date --iso-8601=seconds > "example/demo/runs/dev-build/full-${round}-start.txt"; ./example/demo/run_demo.sh > "example/demo/runs/dev-build/full-${round}-console.log" 2>&1 || exit "$?"; date --iso-8601=seconds > "example/demo/runs/dev-build/full-${round}-end.txt"; done
+make -C example -n publisher subscriber test_hybrid_intra benchmarks > example/demo/runs/dev-build/original-targets-dry-run.log 2>&1
+nm -C example/demo/build/bin/demo_transport > example/demo/runs/dev-build/symbols.txt
+bash -n example/demo/run_demo.sh
+```
+
+原目标 dry-run、符号导出和 Bash 语法检查退出 0；dry-run 不是构建原目标或运行 benchmark。
+完整运行的结果和后续验收在下文追加，不能仅凭命令存在推定通过。
+
+两轮脚本均退出 0，各 188 秒：第一轮 16:50:35～16:53:43，第二轮
+16:53:43～16:56:51（Asia/Shanghai）。第一轮原始目录
+[`20260912-165035-7xn25A`](demo/runs/20260912-165035-7xn25A/commands.txt)，第二轮
+[`20260912-165343-AFJOBA`](demo/runs/20260912-165343-AFJOBA/commands.txt)。
+链接中的 `commands.txt` 包含实际全部角色命令、频道、PID、重定向和退出状态，未省略参数。
+每轮 10 个角色进程均退出 0，所有场景均 PASS；统计如下：
+
+| 场景 | 第一轮有效接收 | 第二轮有效接收 | 真实证据（每轮目录内） |
+| --- | --- | --- | --- |
+| A，自动 INTRA | 293 | 292 | `A.log` 的 MATCHED、INTRA ENABLED、首条和最终汇总 |
+| B，跨进程自动 SHM | 293 | 291 | `B_pub.log` 的 IP/PID、SHM ENABLED；`B_sub1.log` 的有效接收 |
+| C，1 MiB SHM Loan/View | 149 | 149 | `C_pub.log` 的 LOAN_SEND shm_backed；`C_sub1.log` 的 SHM_READ_ONLY_VIEW |
+| D，正常退出与恢复 | 前 293 / 后 292 | 前 291 / 后 291 | `D_pub.log` 的 OFFLINE、DISABLED、真实 Writer 重公告、第二次 ENABLED；两个 `D_sub*.log` 的连续校验 |
+| E，同机强制 RTPS | 293 | 294 | `E_pub.log` 的 RTPS ENABLED；`E_sub1.log` 的首条和有效接收 |
+
+所有接收段均 `invalid=0 gaps_online=0 order_errors=0`；第一条之前不统计缺口。
+发送端所有 `attempts=success`、`fail=0`，这不表示每次发送都送达。
+第一轮 A/B/C/D/E 的发送尝试分别为 293/297/150/598/295，第二轮为
+292/293/149/596/296。无订阅者时的普通发送仍独立记录 `no_peer_attempts`。
+第一轮 D 发布 PID `377397`、前一接收末序号 294、恢复首序号 306；第二轮
+PID `409942`、前末序号 292、恢复首序号 305。每轮两次重公告使用同一 Writer id。
+发布端不重启，恢复后连续接收至少 10 条且完成 30 秒观察；不包含离线补发结论。
+
+4 MiB 和 Ctrl+C 的实际补充验收命令：
+
+```bash
+./example/demo/run_demo.sh C --payload 4194304 --seconds 3 --no-build > example/demo/runs/dev-build/loan-4m-console.log 2>&1
+python3 example/demo/check_interrupt.py > example/demo/runs/dev-build/interrupt-summary.txt 2>&1
+ipcs -m > example/demo/runs/dev-build/ipc-final.log
+```
+
+三条命令退出 0。4 MiB 原始目录
+[`20260912-165716-YEPHGa`](demo/runs/20260912-165716-YEPHGa/commands.txt)：
+15 条有效接收（序号 1～15），全字节及只读 View 属性校验通过，发送失败/在线缺口均为 0。
+Ctrl+C 辅助检查本身退出 0；其被检查脚本返回 **130**，不是完整场景 PASS。
+辅助程序在 B 连续接收 10 条后向本次独立进程组发送 SIGINT，两个子进程
+`432943`、`432944` 均正常退出 0，已 wait 且 `/proc/<pid>` 不存在，没有使用 SIGKILL。
+证据目录 [`20260912-165720-AH5zYd`](demo/runs/20260912-165720-AH5zYd/commands.txt)，
+控制台记录 [`interrupt-x2l8550w/console.log`](demo/runs/interrupt-x2l8550w/console.log)。
+最终宿主 `ipcs -m` 仍只有原 key `0x31c7e6c9`、shmid `19`、196616 bytes、连接数 0 的通知区。
+
+另外实际执行一次负向检查：发布端发送 1024 字节，订阅端期望 2048 字节，必须拒绝。
+完整命令如下：
+
+```bash
+unshare --user --map-root-user --ipc python3 - <<'PY' > example/demo/runs/dev-build/reject-mismatch-summary.txt 2>&1
+from pathlib import Path
+import os, subprocess, tempfile
+root = Path.cwd()
+out = Path(tempfile.mkdtemp(prefix='reject-', dir=root / 'example/demo/runs'))
+env = dict(os.environ, CMW_PATH=str(root), CMW_DEMO_TRACE='1')
+channel = 'demo_reject_' + str(os.getpid())
+children = []
+try:
+    for role, payload in [('pub', '1024'), ('sub', '2048')]:
+        cmd = [str(root / 'example/demo/build/bin/demo_transport'), '--role', role, '--scenario', 'B', '--channel', channel, '--payload', payload, '--hz', '10', '--seconds', '3']
+        stream = (out / (role + '.log')).open('w')
+        p = subprocess.Popen(cmd, env=env, stdout=stream, stderr=subprocess.STDOUT)
+        children.append((role, p, stream))
+        with (out / 'commands.txt').open('a') as f:
+            f.write(repr(cmd) + f' pid={p.pid}\n')
+    status = {role: p.wait(timeout=15) for role, p, stream in children}
+    text = (out / 'sub.log').read_text()
+    assert status['sub'] == 1 and '[CHECK] INVALID' in text and '[RESULT] FAIL' in text, (status, text)
+    print('PASS rejection test: real SHM payload-size mismatch caused invalid reception and nonzero exit;', status, 'logs=', out)
+finally:
+    for role, p, stream in children:
+        if p.poll() is None:
+            p.terminate()
+        p.wait(timeout=10)
+        stream.close()
+        source = root / 'log' / f'demo_{channel}_{p.pid}.log'
+        if source.exists():
+            source.rename(out / f'{role}.runtime.log')
+PY
+```
+
+负向检查命令退出 0，表示确实观察到预期失败；原始目录
+[`reject-2ktr8ty5`](demo/runs/reject-2ktr8ty5/commands.txt)：发布端退出 0、订阅端退出 1，
+接收端打印 INVALID 和 RESULT FAIL，未将错误消息计为有效接收。
+
+文档、入口和空白初检输出在 `demo/runs/dev-build/audit-initial.log`，完整两轮数据/路由
+复算输出在 `full-evidence-audit.log`，均退出 0。最终将这些检查保存为
+[`final-audit.py`](demo/runs/dev-build/final-audit.py)，实际复验命令：
+
+```bash
+python3 example/demo/runs/dev-build/final-audit.py > example/demo/runs/dev-build/audit-final.log 2>&1
+git diff --check
+git status --short
+```
+
+检查退出 0：本地 Markdown 链接/锚点、原目标 dry-run 隔离、Demo 唯一 main、两轮
+接收区间逐项复算、发送结果、Loan/View、D 相同 Writer id 的启停重公告、生成文件忽略
+和空白均通过。扫描本次所有保留记录中的 **47 个子 PID、24 个 channel id**，PID 均不存在，
+对应 `/dev/shm/cmw_<id>` 均不存在；没有删任何宿主通知区或陌生共享段。
+
+未验证真实跨主机或 SIGKILL 故障恢复，未重跑无关 benchmark/完整回归；D 的成功以
+Demo 显式重公告为前提。工作保留在本地 `dev`，未 commit、push 或合并。
+
+补齐记录后执行 `python3 example/demo/runs/dev-build/final-audit.py > example/demo/runs/dev-build/audit-final-after-record.log 2>&1`
+和 `git diff --check`，复查包含本 testlog 新链接的文档、证据及资源状态。
+
+## 2026-09-13 文档可读性整理
+
+工作目录 `/home/jim/cpp/CyberRT`，分支 `dev`，HEAD
+`3c128c37fbc1e5359f6ddb5f185ea5dcd5dfe50e`。本次只整理文档：
+
+- 根 README 和 Demo 指南先给运行命令，再解释结果和排错。
+- TESTING 统一从仓库根目录操作，区分只构建、回归测试、sanitizer 和性能实验。
+- `doc/` 六篇原理文档改为流程、接口和源码导航；补齐原来为空的 base/config 说明。
+- 本 testlog 增加导航，历史正文原样保留；AGENTS 的维护规则不改。
+
+开始时保存文件 SHA256 和历史 testlog 副本，位置为 `log/docs-20260913/before.json`
+及 `testlog-before.txt`。原有 Demo 代码、构建入口和三个后端诊断修改均保留。
+没有实际编译、运行中间件测试或 benchmark，没有使用 sanitizer；下面的 `make -n`
+仅检查入口解析，文档里的 shell 示例只做语法检查，不计作已执行测试。
+
+实际检查命令：
+
+```bash
+cd /home/jim/cpp/CyberRT
+make -C example -n publisher subscriber tests demos benchmarks > log/docs-20260913/build-targets.log 2>&1
+make -C example -f demo/Makefile -n demo-transport > log/docs-20260913/demo-target.log 2>&1
+python3 log/docs-20260913/audit_docs.py > log/docs-20260913/audit-initial.log 2>&1
+```
+
+两个 dry-run 退出 0，未覆盖 BUILD_DIR/FAST_DDS_HOME/SANITIZE/OPTFLAGS；使用各入口默认值，
+即普通 `example/build/`、Demo `example/demo/build/`，Fast DDS 为 `$HOME/cpp/fastdds_2.12/install`。
+初次文档检查退出 1：新增导航已指向本节，但本节当时尚未追加，只有这一处锚点缺失。
+补齐本条记录后复查，完整检查逻辑保存在 [audit_docs.py](../log/docs-20260913/audit_docs.py)：
+
+```bash
+python3 log/docs-20260913/audit_docs.py > log/docs-20260913/audit-final.log 2>&1
+git diff --check
+git status --short
+```
+
+复查范围：13 个仓库 Markdown 文档的本地链接/锚点、代码围栏、操作示例 Bash 语法、
+测试目标与源码是否存在、空白，以及非文档文件和历史 testlog 是否保持原样。
+未检查外部网页可达性；不把静态检查解释为程序功能复验。最终结果见 `audit-final.log`。
+
+最终检查退出 0：168 处本地链接/锚点、27 段 shell 示例、39 处目标引用通过；
+历史正文按字节比对保留，已有非文档文件未变，`git diff --check` 通过。
+补齐结果摘要后的实际复验命令为
+`python3 log/docs-20260913/audit_docs.py > log/docs-20260913/audit-final-after-record.log 2>&1`
+和 `git diff --check`。修改仍保留在本地，未 commit、push 或合并。
+
+## 2026-09-13 Discovery 全新订阅进程自动发现修复
+
+工作目录 `/home/jim/cpp/CyberRT`，分支 `dev`，HEAD
+`3c128c37fbc1e5359f6ddb5f185ea5dcd5dfe50e`。Ubuntu 22.04、Linux
+`6.8.0-138-generic`、GCC 11.4.0、本地 Fast DDS 2.12.0。环境摘要保存在
+`log/discovery-20260913/environment.txt`。
+
+开始时保存当前文件哈希、Demo 源码和历史 testlog，均在 `log/discovery-20260913/`。
+保留之前的文档整理及三个发送后端的诊断修改。本次没有安装依赖、修改系统配置或删除宿主共享内存。
+
+### 问题与修改
+
+去掉 Demo 的 `REANNOUNCE_LIVE_WRITER` 后重现：Publisher 能发现新 Reader 并启用 SHM，
+但全新订阅进程没有旧 Writer 信息，无法收到消息。
+
+本机源码确认：`QOS_PROFILE_TOPO_CHANGE` 声明 RELIABLE / TRANSIENT_LOCAL；
+`AttributesFiller` 只设置公告 QoS，将实际 Reader/Writer 的 reliability 留在 BEST_EFFORT，
+Reader durability 留在 VOLATILE。Fast DDS 的端点构造使用 `ratt/watt.endpoint`，
+`registerReader/registerWriter` 的公告 QoS 不会替代这个配置；可靠 Writer 的历史发送路径位于
+本地 SDK `src/Fast-DDS/src/cpp/rtps/writer/StatefulWriter.cpp` 的 late-joiner 分支。
+
+修复仅在 `Manager::CreateReader/CreateWriter` 显式设置底层端点为
+`RELIABLE + TRANSIENT_LOCAL`，与 Discovery 公告一致。不修改普通 RTPS 数据端点的配置、
+SHM 布局、锁或序列化协议。Demo 删除原来的 Writer 重公告。
+新增 `test_discovery_late_join`，接入 `check-integration`；每轮通过全新 exec 查询历史 Writer，
+确认此前的 Writer LEAVE 生效，然后创建 Subscriber、校验连续消息，三轮保持同一 Publisher。
+
+### 修复前的实际失败
+
+以下构建使用默认普通目录 `example/build/`、Demo 目录 `example/demo/build/`，
+Fast DDS 为 `/home/jim/cpp/fastdds_2.12/install`；未覆盖 `BUILD_DIR`、`OPTFLAGS`、
+`FAST_DDS_HOME` 或 `SANITIZE`。Demo 保留其 Makefile 的 `-O2 -g0`。
+修复前已经删除 Demo 重公告，但 Discovery 代码仍是旧实现：
+
+```bash
+cd /home/jim/cpp/CyberRT
+mkdir -p log/discovery-20260913
+timeout --signal=TERM --kill-after=5s 300s make -C example -f demo/Makefile -j2 demo-transport > log/discovery-20260913/build-before.log 2>&1
+timeout --signal=TERM --kill-after=5s 90s ./example/demo/run_demo.sh D --seconds 3 --no-build > log/discovery-20260913/demo-D-before.log 2>&1
+timeout --signal=TERM --kill-after=5s 300s make -C example -j2 test_discovery_late_join > log/discovery-20260913/regression-build-before.log 2>&1
+CMW_PATH="$PWD" unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir "$PWD/example/build/bin" --timeout 90 test_discovery_late_join > log/discovery-20260913/regression-before.log 2>&1
+```
+
+两个构建退出 0。D 退出 1：第二个 Subscriber 等待 20 秒仍为 `valid=0`；原始记录在
+`example/demo/runs/20260913-143942-eC6t5Q/`。新回归也退出 1：10 秒发现期限内
+`historical Writer discovery: count=0`，不是构建失败，也不是外层 90 秒超时。
+这些失败保留，未用成功日志覆盖。
+
+### 修复后的构建与运行
+
+修改 Discovery 后实际执行：
+
+```bash
+cd /home/jim/cpp/CyberRT
+timeout --signal=TERM --kill-after=5s 300s make -C example -j2 test_discovery_late_join test_hybrid_intra test_hybrid_shm_multiprocess test_hybrid_dynamic_shm_lifecycle test_loaned_message_discovery_churn test_rtps_same_host_multiprocess > log/discovery-20260913/regression-build-after.log 2>&1
+timeout --signal=TERM --kill-after=5s 300s make -C example -f demo/Makefile -j2 demo-transport > log/discovery-20260913/demo-build-after.log 2>&1
+CMW_PATH="$PWD" unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir "$PWD/example/build/bin" --timeout 90 test_discovery_late_join test_hybrid_intra test_hybrid_shm_multiprocess test_hybrid_dynamic_shm_lifecycle test_loaned_message_discovery_churn test_rtps_same_host_multiprocess > log/discovery-20260913/regression-after.log 2>&1
+timeout --signal=TERM --kill-after=5s 120s ./example/demo/run_demo.sh D --no-build > log/discovery-20260913/demo-D-after.log 2>&1 && timeout --signal=TERM --kill-after=5s 120s ./example/demo/run_demo.sh all --seconds 3 --no-build > log/discovery-20260913/demo-all-after.log 2>&1
+```
+
+两个构建、回归 runner、D 默认流程和 A～E 短流程均退出 0。
+回归 runner 汇总为 **passed=6、failed=0、timed_out=0**，合计 8 个 gtest 用例：
+
+| 程序 | 实际结果 |
+| --- | --- |
+| `test_discovery_late_join` | 三个全新进程在 Reader JOIN 前发现同一旧 Writer，各收 10 条连续有效消息 |
+| `test_hybrid_intra` | 同进程自动 INTRA 的 3 个用例通过 |
+| `test_hybrid_shm_multiprocess` | Subscriber 先启动、真实 Discovery 自动 SHM 通过 |
+| `test_hybrid_dynamic_shm_lifecycle` | 普通消息动态 SHM、较长拓扑通知通过 |
+| `test_loaned_message_discovery_churn` | Loan 发布期间的 INTRA/SHM 订阅变化通过 |
+| `test_rtps_same_host_multiprocess` | 同机强制 RTPS 通过 |
+
+新回归中，Publisher PID 为 **69397**，Writer ID 为 **1928490569995350791**。
+三个订阅 PID 为 69405、69455、69551，接收区间分别是 2～11、74～83、88～97；
+每轮均打印 `before Reader JOIN` 和 `round=... PASS`。离线区间不计入下一进程的序号缺口。
+运行库日志由 Logger 写入根目录 `log/DiscoveryLateJoin_<pid>.log`。
+
+D 默认每段接收 30 秒，原始记录为 `example/demo/runs/20260913-144618-FOLPl6/`：
+Publisher PID **71246** 始终不变，发送 attempts=success=599、fail=0；旧订阅进程收到
+2～293，共 292 条，新进程收到 306～598，共 293 条。真实 OFFLINE、SHM DISABLED、
+再次 ENABLED 和 `RECOVERED ... contiguous=10` 均出现，没有 Writer 重公告。
+
+A～E 短流程原始记录为 `example/demo/runs/20260913-144721-95IFso/`：
+A/B/C/D 前段/D 后段/E 分别收到 30/30/15/30/30/30 条有效消息；C 为默认 1 MiB、5 Hz。
+D Publisher PID 79270，旧段最后 31、新段首条 44。全部接收端 invalid、gaps_online、
+order_errors 为 0，所有发布端 fail=0。原始命令、PID、退出码和运行库日志仍沿用 Demo 的独立运行目录，
+本次汇总与构建输出保存在根目录 `log/discovery-20260913/`。
+
+### 静态检查与边界
+
+实际命令：
+
+```bash
+cd /home/jim/cpp/CyberRT
+make -C example -n publisher subscriber tests demos benchmarks > log/discovery-20260913/build-targets.log 2>&1
+make -C example -f demo/Makefile -n demo-transport > log/discovery-20260913/demo-target.log 2>&1
+nm example/demo/build/bin/demo_transport > log/discovery-20260913/demo-symbols.log
+python3 log/discovery-20260913/audit_evidence.py > log/discovery-20260913/audit-evidence.log 2>&1
+python3 log/discovery-20260913/audit_docs.py > log/discovery-20260913/audit-docs.log 2>&1
+git diff --check
+git status --short
+```
+
+入口 dry-run、符号和运行证据检查退出 0：新增 main 未混入原目标，Demo 中不再调用 Writer 重公告；
+检查到的 20 个 Demo/新回归子 PID 均不存在，7 个 Demo 频道共享段不存在；本次范围外的已有文件
+与开始时哈希一致。文档检查结果在 `audit-docs.log`，覆盖本地链接/锚点、围栏、shell 语法、
+测试目标和历史 testlog 前缀保留；shell 示例的静态解析不计为额外程序测试。
+
+本次只验证同机正常退出及全新进程加入，没有运行 sanitizer、全部回归或 benchmark；
+未重复 9 月 12 日的两轮 3 分钟完整演示、4 MiB 和 Ctrl+C 检查。
+原有有限 History 的淘汰策略未改，历史公告淘汰后的拓扑重建、跨主机和 SIGKILL 恢复不在本次结论内。
+恢复只接收之后的新消息，不提供离线补发。修改保留在本地，未 commit、push 或合并。
+
+最终文档检查退出 0：13 个 Markdown、174 处本地链接/锚点、28 段 shell 示例、40 处目标引用通过；
+历史 testlog 原文按前缀比对保留。补齐本摘要后再次执行
+`python3 log/discovery-20260913/audit_docs.py > log/discovery-20260913/audit-docs-final.log 2>&1`
+和 `git diff --check`，结果均为退出 0。

@@ -102,7 +102,8 @@ INTEGRATION_TEST_TARGETS := test_condition_notifier test_shm_segment_exec test_p
                             test_rtps_lifecycle_regression \
                             test_loaned_message_rtps_multiprocess \
                             test_rtps_transmitter_lifecycle \
-                            test_loaned_message_discovery_churn
+                            test_loaned_message_discovery_churn \
+                            test_discovery_late_join
 FORMAL_TEST_TARGETS := $(FAST_TEST_TARGETS) $(INTEGRATION_TEST_TARGETS)
 
 # Hand-operated programs and diagnostics remain buildable, but are never run

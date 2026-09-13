@@ -94,6 +94,9 @@ void ShmTransmitter<M>::Enable(){
     segment_ = std::move(segment);
     notifier_ = notifier;
     this->enabled_ = true;
+#ifdef CMW_DEMO_ROUTE_TRACE
+    CMW_DEMO_ROUTE_TRACE("SHM", true, this->attr_.channel_name);
+#endif
     ++enable_epoch_;
 }
 
@@ -104,6 +107,9 @@ void ShmTransmitter<M>::Disable(){
         segment_ = nullptr;
         notifier_ = nullptr;
         this->enabled_ = false;
+#ifdef CMW_DEMO_ROUTE_TRACE
+        CMW_DEMO_ROUTE_TRACE("SHM", false, this->attr_.channel_name);
+#endif
   }
 }
 
