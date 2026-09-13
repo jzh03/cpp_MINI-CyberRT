@@ -4,20 +4,26 @@
 环境限制及布局测量；较早的失败记录保留，后续复跑结果单独记录。
 功能性更新见 [README](../README.md)，文档职责见 [AGENTS.md](../AGENTS.md)。
 历史条目未给出完整命令的部分保留原记录，不将使用指南中的示例补写为已执行命令。
+纯文档及维护约定的改动和静态检查不纳入本页。
 
 ## 查找记录
 
-本页是实际执行档案，命令和失败历史按原样保留。要复制命令重新操作，请先看 [测试指南](TESTING.md) 或 [Demo 指南](demo/README.md)。
+按改动模块分组，组内按时间从早到晚排列；同日按正文先后，日期未记录的条目放在组末。
+每次更新正文时同步更新本索引，具体约定见 [AGENTS.md](../AGENTS.md#更新规则)。
+历史命令和失败记录保留原样；要复制命令重新操作，请看 [测试指南](TESTING.md) 或 [Demo 指南](demo/README.md)。
 
-| 想查什么 | 记录入口 |
-| --- | --- |
-| 面试 Demo、两轮完整运行、4 MiB、Ctrl+C | [2026-09-12 Demo 验收](#2026-09-12-面试通信-demo-本地验收) |
-| SHM 性能三轮数据与统计口径 | [2026-09-11 性能实验](#2026-09-11-独立进程-shm-性能实验) |
-| Notifier 并发、丢弃和 sanitizer | [2026-09-11 Notifier 回归](#2026-09-11-notifier-发布短锁槽位互斥及丢弃策略) |
-| 日志目录与路径检查 | [2026-09-11 日志目录](#2026-09-11-统一日志目录) |
-| 生命周期同步与重入 | [2026-09-10 生命周期](#2026-09-10-发送端生命周期同步) |
-| 早期共享内存验证和环境失败 | [2026-09-10 首轮](#2026-09-10-首轮验证)、[后续复跑](#2026-09-10-2001-后续复跑) |
-| 本次文档整理检查 | [2026-09-13 文档整理](#2026-09-13-文档可读性整理) |
+| 改动模块 | 记录时间 | 记录入口 |
+| --- | --- | --- |
+| SHM 共享内存 | 2026-09-10 | [布局、Loan 首轮验证与环境失败](#2026-09-10-首轮验证) |
+| SHM 共享内存 | 2026-09-10 20:01 | [普通构建及 UBSan 复跑](#2026-09-10-2001-后续复跑) |
+| SHM 共享内存 | 2026-09-11 | [Notifier 并发、丢弃与 sanitizer 回归](#2026-09-11-notifier-发布短锁槽位互斥及丢弃策略) |
+| SHM 共享内存 | 2026-09-11 | [独立进程性能实验：三轮数据与统计口径](#2026-09-11-独立进程-shm-性能实验) |
+| SHM 共享内存 | 未记录 | [共享内存布局 v1/v2 实测数据](#本次共享内存布局核对) |
+| Transport 发送端 | 2026-09-10 | [INTRA、SHM、RTPS 生命周期同步与重入](#2026-09-10-发送端生命周期同步) |
+| Discovery 自动发现 | 2026-09-13 | [全新订阅进程发现修复、失败复现及 Demo 复验](#2026-09-13-discovery-全新订阅进程自动发现修复) |
+| Logger 日志 | 2026-09-11 | [统一日志目录、旧日志迁移与路径检查](#2026-09-11-统一日志目录) |
+| 通信 Demo | 2026-09-12 | [A～E、两轮完整运行、4 MiB 与 Ctrl+C](#2026-09-12-面试通信-demo-本地验收) |
+| 运行环境 | 未记录 | [早期 TSan 启动限制](#更早的环境记录日期未记录) |
 
 ## 2026-09-10 首轮验证
 
@@ -209,68 +215,6 @@ Fast DDS 库沿用本地安装，未使用 sanitizer 重编译。RTPS 数据路�
 在 dev 工作区供审阅，未提交或推送。运行时核心变更见 [README 的同步约定](../README.md#发送端生命周期与并发边界)，
 其余主要为三个新测试入口、共享测试辅助头、现有 SHM/RTPS 编排补强与验证说明。
 
-
-## 2026-09-11 文档职责整理
-
-起始分支 `dev`，HEAD `b72973e7548d78e4672db7f5c2bf55b5d8f07f94`，工作区干净。
-新建根目录 AGENTS.md；将功能和同步/兼容性说明归入 README.md，测试程序介绍
-与使用指南集中到 TESTING.md，历史实际命令、失败与复验结果保留在本文件。
-本次仅修改这四份 Markdown 文档，未构建或运行中间件测试；上述历史通过结果
-不代表本次重新执行。未补造历史缺失命令。
-
-文档检查实际工作目录为 `/home/jim/cpp/CyberRT`，完整命令如下。
-只检查本地链接，不访问 README 引用的外部网页；`bash -n` 仅检查语法，不执行示例。
-
-```sh
-python3 - <<'DOC_CHECK'
-from pathlib import Path
-import re
-import subprocess
-from urllib.parse import unquote
-
-files = [Path(p) for p in (
-    'AGENTS.md', 'README.md', 'example/TESTING.md', 'example/testlog.md')]
-for path in files:
-    content = re.sub(r'```.*?```', '', path.read_text(), flags=re.S)
-    for link in re.findall(r'\[[^\]]*\]\(([^)]+)\)', content):
-        if '://' in link:
-            continue
-        name, _, anchor = unquote(link).partition('#')
-        target = path.parent / name if name else path
-        assert target.is_file(), (path, link)
-        if anchor:
-            headings = re.findall(r'^#+ (.+)$', target.read_text(), re.M)
-            anchors = {re.sub(r'[^\w\s-]', '', h.lower()).replace(' ', '-')
-                       for h in headings}
-            assert anchor in anchors, (path, link)
-makefile = Path('example/Makefile').read_text().replace('\\\n', ' ')
-guide = Path('example/TESTING.md').read_text()
-count = 0
-for group in ('FAST_TEST_TARGETS', 'INTEGRATION_TEST_TARGETS', 'BENCHMARK_TARGETS'):
-    targets = re.search(r'^' + group + r'\s*:=\s*(.+)$', makefile, re.M).group(1).split()
-    for target in targets:
-        assert '`' + target + '`' in guide, target
-    count += len(targets)
-blocks = re.findall(r'```sh\n(.*?)```', guide, re.S)
-for block in blocks:
-    subprocess.run(['bash', '-n'], input=block, text=True, check=True)
-subprocess.run(['git', 'diff', '--check'], check=True)
-result = subprocess.run(['git', 'diff', '--no-index', '--check', '/dev/null', 'AGENTS.md'],
-                        capture_output=True, text=True)
-assert result.returncode in (0, 1) and not result.stdout and not result.stderr, result
-print(f'PASS: {len(files)} documents, local links/anchors, {count} targets, '
-      f'{len(blocks)} shell examples, whitespace checks')
-DOC_CHECK
-```
-
-检查退出码 0，输出：
-
-```text
-PASS: 4 documents, local links/anchors, 27 targets, 7 shell examples, whitespace checks
-```
-
-本地链接与锚点、27 个正式回归/性能目标的介绍、示例命令语法及空白检查全部通过。
-`git diff --check` 无输出；新增 AGENTS.md 也单独通过空白检查。
 
 ## 2026-09-11 统一日志目录
 
@@ -1061,51 +1005,6 @@ Demo 显式重公告为前提。工作保留在本地 `dev`，未 commit、push 
 
 补齐记录后执行 `python3 example/demo/runs/dev-build/final-audit.py > example/demo/runs/dev-build/audit-final-after-record.log 2>&1`
 和 `git diff --check`，复查包含本 testlog 新链接的文档、证据及资源状态。
-
-## 2026-09-13 文档可读性整理
-
-工作目录 `/home/jim/cpp/CyberRT`，分支 `dev`，HEAD
-`3c128c37fbc1e5359f6ddb5f185ea5dcd5dfe50e`。本次只整理文档：
-
-- 根 README 和 Demo 指南先给运行命令，再解释结果和排错。
-- TESTING 统一从仓库根目录操作，区分只构建、回归测试、sanitizer 和性能实验。
-- `doc/` 六篇原理文档改为流程、接口和源码导航；补齐原来为空的 base/config 说明。
-- 本 testlog 增加导航，历史正文原样保留；AGENTS 的维护规则不改。
-
-开始时保存文件 SHA256 和历史 testlog 副本，位置为 `log/docs-20260913/before.json`
-及 `testlog-before.txt`。原有 Demo 代码、构建入口和三个后端诊断修改均保留。
-没有实际编译、运行中间件测试或 benchmark，没有使用 sanitizer；下面的 `make -n`
-仅检查入口解析，文档里的 shell 示例只做语法检查，不计作已执行测试。
-
-实际检查命令：
-
-```bash
-cd /home/jim/cpp/CyberRT
-make -C example -n publisher subscriber tests demos benchmarks > log/docs-20260913/build-targets.log 2>&1
-make -C example -f demo/Makefile -n demo-transport > log/docs-20260913/demo-target.log 2>&1
-python3 log/docs-20260913/audit_docs.py > log/docs-20260913/audit-initial.log 2>&1
-```
-
-两个 dry-run 退出 0，未覆盖 BUILD_DIR/FAST_DDS_HOME/SANITIZE/OPTFLAGS；使用各入口默认值，
-即普通 `example/build/`、Demo `example/demo/build/`，Fast DDS 为 `$HOME/cpp/fastdds_2.12/install`。
-初次文档检查退出 1：新增导航已指向本节，但本节当时尚未追加，只有这一处锚点缺失。
-补齐本条记录后复查，完整检查逻辑保存在 [audit_docs.py](../log/docs-20260913/audit_docs.py)：
-
-```bash
-python3 log/docs-20260913/audit_docs.py > log/docs-20260913/audit-final.log 2>&1
-git diff --check
-git status --short
-```
-
-复查范围：13 个仓库 Markdown 文档的本地链接/锚点、代码围栏、操作示例 Bash 语法、
-测试目标与源码是否存在、空白，以及非文档文件和历史 testlog 是否保持原样。
-未检查外部网页可达性；不把静态检查解释为程序功能复验。最终结果见 `audit-final.log`。
-
-最终检查退出 0：168 处本地链接/锚点、27 段 shell 示例、39 处目标引用通过；
-历史正文按字节比对保留，已有非文档文件未变，`git diff --check` 通过。
-补齐结果摘要后的实际复验命令为
-`python3 log/docs-20260913/audit_docs.py > log/docs-20260913/audit-final-after-record.log 2>&1`
-和 `git diff --check`。修改仍保留在本地，未 commit、push 或合并。
 
 ## 2026-09-13 Discovery 全新订阅进程自动发现修复
 
