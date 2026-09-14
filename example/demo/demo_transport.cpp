@@ -158,7 +158,7 @@ RoleAttributes Attributes(const Options& o) {
   a.node_id = common::GlobalData::RegisterNode(a.node_name);
   a.message_type = o.scenario == "C" ? "LoanedMessage" : "MiniDemoMessage";
   a.qos_profile.msg_size = o.payload;
-  a.qos_profile.depth = o.scenario == "C" ? 0 : 16;
+  a.qos_profile.depth = 16;
   return a;
 }
 
@@ -210,8 +210,14 @@ template <typename T> int Run(const Options& o) {
         }, OptionalMode::RTPS);
     if ((sending && !rtps_pub) || (receiving && !rtps_sub)) throw std::runtime_error("RTPS endpoint failed");
   } else {
-    if (receiving) sub = node->CreateSubscriber<T>(a,
-        [&](const std::shared_ptr<T>& m) { Receive(m, stats, o); });
+    if (receiving) {
+      SubscriberConfig config;
+      config.channel_name = a.channel_name;
+      config.qos_profile = a.qos_profile;
+      config.history_depth = o.scenario == "C" ? 0 : 16;
+      sub = node->CreateSubscriber<T>(config,
+          [&](const std::shared_ptr<T>& m) { Receive(m, stats, o); });
+    }
     if (sending) pub = node->CreatePublisher<T>(a);
     if ((sending && !pub) || (receiving && !sub)) throw std::runtime_error("Node endpoint failed");
   }

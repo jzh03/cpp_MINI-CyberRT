@@ -114,6 +114,7 @@ int SubscriberWorker(const std::string& channel, int publisher_pid) {
     poll(nullptr, 0, 10);
   }
   if (writers.size() != 1 || writers.front().process_id != publisher_pid ||
+      writers.front().qos_profile.durability != config::DURABILITY_VOLATILE ||
       manager->HasWriter(channel + "_departed")) {
     std::fprintf(stderr, "[CHECK] FAIL historical Writer discovery: count=%zu\n",
                  writers.size());

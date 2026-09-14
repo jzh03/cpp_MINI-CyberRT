@@ -120,7 +120,14 @@ auto ReceiverManager<MessageT>::GetReceiver(const RoleAttributes& role_attr) ->
     
     std::lock_guard<std::mutex> lg(receiver_map_mutex_);
     const std::string& channel_name = role_attr.channel_name;
-    //确保一个channel只有一个receiver
+    auto existing = receiver_map_.find(channel_name);
+    if (existing != receiver_map_.end() && existing->second &&
+        !config::SameQosProfile(existing->second->attributes().qos_profile,
+                                role_attr.qos_profile)) {
+        AERROR << "Conflicting QoS for shared receiver: " << channel_name;
+        return nullptr;
+    }
+    // Ensure one compatible Receiver per channel and message type.
     if(receiver_map_.count(channel_name) == 0){
         receiver_map_[channel_name] = 
                 transport::Transport::Instance()->CreateReceiver<MessageT>(
@@ -132,7 +139,9 @@ auto ReceiverManager<MessageT>::GetReceiver(const RoleAttributes& role_attr) ->
                             }
                 );
     }
-    return receiver_map_[channel_name];
+    auto result = receiver_map_[channel_name];
+    if (!result) receiver_map_.erase(channel_name);
+    return result;
 
 }
 

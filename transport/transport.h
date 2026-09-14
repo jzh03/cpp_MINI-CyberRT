@@ -74,7 +74,12 @@ auto Transport::CreateTransmitter(const RoleAttributes& attr,
         return nullptr;
     }
     std::shared_ptr<Transmitter<M>> transmitter = nullptr;
-    RoleAttributes modified_attr = attr ;
+    RoleAttributes modified_attr = attr;
+    std::string error;
+    if (!config::NormalizeQosProfile(attr.qos_profile, &modified_attr.qos_profile, &error)) {
+        AERROR << "Invalid transport QoS: " << error;
+        return nullptr;
+    }
 
 
     switch (mode)
@@ -102,6 +107,7 @@ auto Transport::CreateTransmitter(const RoleAttributes& attr,
     if( mode != OptionalMode::HYBRID){
         ADEBUG << "transmitter Enable";
         transmitter->Enable();
+        if (!transmitter->enabled()) return nullptr;
     }
     AINFO << "CreateTransmitter Sucess";
     return transmitter;
@@ -122,6 +128,11 @@ auto Transport::CreateReceiver(const RoleAttributes& attr,
     std::shared_ptr<Receiver<M>> receiver = nullptr;
 
     RoleAttributes modified_attr = attr;
+    std::string error;
+    if (!config::NormalizeQosProfile(attr.qos_profile, &modified_attr.qos_profile, &error)) {
+        AERROR << "Invalid transport QoS: " << error;
+        return nullptr;
+    }
     ADEBUG << "Receiver Mode: " << mode;
     switch (mode)
     {
@@ -147,85 +158,7 @@ auto Transport::CreateReceiver(const RoleAttributes& attr,
     // HYBRID Receiver 由 Publisher JOIN/LEAVE 驱动具体接收路径。
     if (mode != OptionalMode::HYBRID) {
         receiver->Enable();
-    }
-    return receiver;
-}
-
-template <>
-inline std::shared_ptr<Transmitter<LoanedMessage>>
-Transport::CreateTransmitter<LoanedMessage>(const RoleAttributes& attr,
-                                             const OptionalMode& mode)
-{
-    if(is_shutdown_.load()) {
-        std::cout << "transport has been shut down." << std::endl;
-        return nullptr;
-    }
-
-    std::shared_ptr<Transmitter<LoanedMessage>> transmitter = nullptr;
-    switch(mode) {
-        case OptionalMode::INTRA:
-            transmitter = std::make_shared<IntraTransmitter<LoanedMessage>>(attr);
-            break;
-        case OptionalMode::SHM:
-            transmitter = std::make_shared<ShmTransmitter<LoanedMessage>>(attr);
-            break;
-        case OptionalMode::RTPS:
-            transmitter = std::make_shared<RtpsTransmitter<LoanedMessage>>(
-                attr, participant());
-            break;
-        case OptionalMode::HYBRID:
-            transmitter = std::make_shared<HybridTransmitter<LoanedMessage>>(
-                attr, participant());
-            break;
-        default:
-            return nullptr;
-    }
-
-    RETURN_VAL_IF_NULL(transmitter, nullptr);
-    if(mode != OptionalMode::HYBRID) {
-        transmitter->Enable();
-    }
-    AINFO << "Create LoanedMessage Transmitter Sucess";
-    return transmitter;
-}
-
-template <>
-inline std::shared_ptr<Receiver<LoanedMessage>>
-Transport::CreateReceiver<LoanedMessage>(
-    const RoleAttributes& attr,
-    const Receiver<LoanedMessage>::MessageListener& msg_listener,
-    const OptionalMode& mode)
-{
-    if(is_shutdown_.load()) {
-        AINFO << "transport has been shut down.";
-        return nullptr;
-    }
-
-    std::shared_ptr<Receiver<LoanedMessage>> receiver = nullptr;
-    switch(mode) {
-        case OptionalMode::INTRA:
-            receiver = std::make_shared<IntraReceiver<LoanedMessage>>(
-                attr, msg_listener);
-            break;
-        case OptionalMode::SHM:
-            receiver = std::make_shared<ShmReceiver<LoanedMessage>>(
-                attr, msg_listener);
-            break;
-        case OptionalMode::RTPS:
-            receiver = std::make_shared<RtpsReceiver<LoanedMessage>>(
-                attr, msg_listener);
-            break;
-        case OptionalMode::HYBRID:
-            receiver = std::make_shared<HybridReceiver<LoanedMessage>>(
-                attr, msg_listener);
-            break;
-        default:
-            return nullptr;
-    }
-
-    RETURN_VAL_IF_NULL(receiver, nullptr);
-    if(mode != OptionalMode::HYBRID) {
-        receiver->Enable();
+        if (!receiver->enabled()) return nullptr;
     }
     return receiver;
 }

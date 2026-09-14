@@ -15,26 +15,15 @@ class Node;
 
 struct SubscriberConfig
 {
-    SubscriberConfig(){
-        qos_profile.history = QosHistoryPolicy::HISTORY_KEEP_LAST;
-        qos_profile.depth = 1;
-        qos_profile.mps = 0;
-        qos_profile.reliability = QosReliabilityPolicy::RELIABILITY_RELIABLE;
-        qos_profile.durability = QosDurabilityPolicy::DURABILITY_VOLATILE;
-    }
-
-    SubscriberConfig(const SubscriberConfig& other)
-        : channel_name(other.channel_name),
-          qos_profile(other.qos_profile),
-          pending_queue_size(other.pending_queue_size) {}
-
     std::string channel_name;
     QosProfile qos_profile;
     /**
      * @brief configuration for responding ChannelBuffer.
      * Older messages will dropped if you have no time to handle
      */
-    uint32_t pending_queue_size;
+    uint32_t pending_queue_size = DEFAULT_PENDING_QUEUE_SIZE;
+    // Independent observation cache; zero disables observation retention.
+    uint32_t history_depth = DEFAULT_OBSERVATION_HISTORY_DEPTH;
 };
 
 
@@ -105,7 +94,8 @@ private:
     template <typename MessageT>
     auto CreateSubscriber(const RoleAttributes& role_attr,
                         const CallbackFunc<MessageT>& reader_func,
-                        uint32_t pending_queue_size = DEFAULT_PENDING_QUEUE_SIZE)
+                        uint32_t pending_queue_size = DEFAULT_PENDING_QUEUE_SIZE,
+                        uint32_t history_depth = DEFAULT_OBSERVATION_HISTORY_DEPTH)
         -> std::shared_ptr<Subscriber<MessageT>>;
 
     template <typename MessageT>
@@ -170,13 +160,15 @@ auto NodeChannelImpl::CreateSubscriber(const SubscriberConfig& config,
     role_attr.channel_name = config.channel_name;
     role_attr.qos_profile = config.qos_profile;
     return this->template CreateSubscriber<MessageT>(role_attr, reader_func,
-                                               config.pending_queue_size);
+                                               config.pending_queue_size,
+                                               config.history_depth);
 }
 
 template <typename MessageT>
 auto NodeChannelImpl::CreateSubscriber(const RoleAttributes& role_attr,
                                    const CallbackFunc<MessageT>& reader_func,
-                                   uint32_t pending_queue_size)
+                                   uint32_t pending_queue_size,
+                                   uint32_t history_depth)
         -> std::shared_ptr<Subscriber<MessageT>> {
     
     if(role_attr.channel_name.empty()){
@@ -190,7 +182,8 @@ auto NodeChannelImpl::CreateSubscriber(const RoleAttributes& role_attr,
     std::shared_ptr<Subscriber<MessageT>> subscriber_ptr = nullptr;
 
     subscriber_ptr = std::make_shared<Subscriber<MessageT>>(new_attr, reader_func,
-                                                            pending_queue_size);
+                                                            pending_queue_size,
+                                                            history_depth);
     RETURN_VAL_IF_NULL(subscriber_ptr, nullptr);
     RETURN_VAL_IF(!subscriber_ptr->Init(), nullptr);
     return subscriber_ptr;
@@ -202,7 +195,7 @@ void NodeChannelImpl::FillInAttr(RoleAttributes* attr){
     attr->host_name = node_attr_.host_name;
     attr->host_ip = node_attr_.host_ip;
     attr->process_id = node_attr_.process_id;
-    attr->node_name = node_attr_.node_id;
+    attr->node_name = node_attr_.node_name;
     attr->node_id = node_attr_.node_id;
 
     auto channel_id = common::GlobalData::RegisterChannel(attr->channel_name);

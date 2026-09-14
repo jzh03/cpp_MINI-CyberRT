@@ -12,6 +12,7 @@
 #include <cmw/config/RoleAttributes.h>
 #include <cmw/transport/rtps/participant.h>
 #include <cmw/transport/rtps/attributes_filler.h>
+#include <cmw/transport/rtps/qos_history.h>
 #include <fastrtps/rtps/RTPSDomain.h>
 #include <cmw/serialize/data_stream.h>
 using namespace eprosima::fastrtps::rtps;
@@ -73,7 +74,7 @@ private:
 
 
     eprosima::fastrtps::rtps::RTPSWriter* rtps_writer;
-    eprosima::fastrtps::rtps::WriterHistory* mp_history;
+    QosWriterHistory* mp_history;
 
 };
 
@@ -110,11 +111,14 @@ void RtpsTransmitter<M>::Enable(){
     // 创建 RtpsWriter 的配置信息实例
     RtpsWriterAttributes writer_attr;
     // 填充 RtpsWriter 的配置信息
-    AttributesFiller::FillInWriterAttr(
-        this->attr_.channel_name, this->attr_.qos_profile,&writer_attr);
+    if (!AttributesFiller::FillInWriterAttr(
+        this->attr_.channel_name, this->attr_.qos_profile, &writer_attr)) {
+      AERROR << "Invalid RTPS writer QoS: " << this->attr_.channel_name;
+      return;
+    }
     
     //创建rtps writer history
-    mp_history = new WriterHistory(writer_attr.hatt);
+    mp_history = new QosWriterHistory(writer_attr.hatt, this->attr_.qos_profile);
 
     //创建rtps writer
     rtps_writer  = RTPSDomain::createRTPSWriter(participant, writer_attr.watt , mp_history);
@@ -223,7 +227,8 @@ bool RtpsTransmitter<M>::TransmitSerialized(const char* serialized,
   if(ch == nullptr) {
     return false;
   }
-  if(ch->serializedPayload.data == nullptr) {
+  if(ch->serializedPayload.data == nullptr ||
+     ch->serializedPayload.max_size < serialized_size) {
     rtps_writer->release_change(ch);
     return false;
   }
@@ -245,14 +250,7 @@ bool RtpsTransmitter<M>::TransmitSerialized(const char* serialized,
   }
   //发送数据
 
-  bool flag = mp_history->add_change(ch,wparams);
-
-  //这里不知道是不是fastrtps的bug，需要去判断writerhistory是否满了，如果满了需要清空一段
-  if(!flag)
-  {
-    rtps_writer->remove_older_changes(20);
-    flag = mp_history->add_change(ch,wparams);
-  }
+  bool flag = mp_history->AddChange(ch, wparams);
   if(!flag) {
     // History only owns the change after a successful add.
     rtps_writer->release_change(ch);

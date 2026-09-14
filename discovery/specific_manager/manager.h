@@ -9,6 +9,7 @@
 #include <cmw/base/signal.h>
 #include <cmw/config/topology_change.h>
 #include <cmw/discovery/communication/reader_listener.h>
+#include <cmw/transport/rtps/qos_history.h>
 
 #include <fastrtps/rtps/reader/RTPSReader.h>
 #include <fastrtps/rtps/writer/RTPSWriter.h>
@@ -141,7 +142,8 @@ protected:
 
 
     eprosima::fastrtps::rtps::RTPSWriter* writer_;
-    eprosima::fastrtps::rtps::WriterHistory* writer_history_;
+    transport::QosWriterHistory* writer_history_;
+    transport::QosReaderHistory* reader_history_;
 
     
     eprosima::fastrtps::rtps::RTPSReader* reader_;

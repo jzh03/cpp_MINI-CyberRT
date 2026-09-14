@@ -73,6 +73,12 @@ Publisher<MessageT>::~Publisher(){
 
 template<typename MessageT>
 bool Publisher<MessageT>::Init(){
+    std::string error;
+    if (!config::NormalizeQosProfile(this->role_attr_.qos_profile,
+                                     &this->role_attr_.qos_profile, &error)) {
+        AERROR << "Invalid publisher QoS: " << error;
+        return false;
+    }
     {
         std::lock_guard<std::mutex> lg(lock_);
         if(init_){

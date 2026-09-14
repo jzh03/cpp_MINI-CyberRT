@@ -22,6 +22,8 @@ class Endpoint
     
         const Identity& id() const{ return id_;}
         const RoleAttributes& attributes() const { return attr_;}
+        // Initialization inspection only; not a synchronization primitive.
+        bool enabled() const { return enabled_; }
 
     protected:
         bool enabled_;

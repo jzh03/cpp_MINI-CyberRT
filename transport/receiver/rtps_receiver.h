@@ -45,11 +45,10 @@ void RtpsReceiver<M>::Enable(){
     if(this->enabled_){
         return;
     }
-    dispatcher_->AddListener<M>(
+    this->enabled_ = dispatcher_->AddListener<M>(
         this->attr_, std::bind(&RtpsReceiver<M>::OnNewMessage , this,
             std::placeholders::_1, std::placeholders::_2));
 
-    this->enabled_ = true;
 }
 
 template <typename M>

@@ -86,14 +86,14 @@ DEPENDENCY_FILES = $(DEPENDENCY_OBJS:.o=.d)
 
 # `tests` is deliberately build-only.  These are the binaries which have a
 # reliable pass/fail contract and are eligible for the check targets below.
-FAST_TEST_TARGETS := test_serialize test_blocker test_node \
+FAST_TEST_TARGETS := test_qos test_serialize test_blocker test_node \
                      test_publisher_subscriber test_transport_mode_selection \
                      test_shm_segment_robustness test_shm_block_lease_generation \
                      test_shm_dispatcher_robustness test_shm_transmitter_receiver \
                      test_shm_loaned_message test_shm_transmitter_lifecycle_regression \
                      test_loaned_message_hybrid test_hybrid_intra \
                      test_intra_transmitter_lifecycle test_logger_paths
-INTEGRATION_TEST_TARGETS := test_condition_notifier test_shm_segment_exec test_posix_segment_multiprocess \
+INTEGRATION_TEST_TARGETS := test_qos_rtps test_condition_notifier test_shm_segment_exec test_posix_segment_multiprocess \
                             test_loaned_message_dynamic_shm_lifecycle \
                             test_shm_loaned_message_multiprocess \
                             test_hybrid_shm_multiprocess \

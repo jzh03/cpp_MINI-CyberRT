@@ -39,6 +39,10 @@ class HybridTransmitter : public Transmitter<M> {
   }
 
   void Enable(const RoleAttributes& opposite_attr) override {
+    if (!config::IsQosCompatible(this->attr_.qos_profile, opposite_attr.qos_profile)) {
+      AERROR << "Incompatible writer/reader QoS: " << this->attr_.channel_name;
+      return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     OptionalMode mode = config::SelectMode(this->attr_, opposite_attr);
     PeerMap* peers = Peers(mode);

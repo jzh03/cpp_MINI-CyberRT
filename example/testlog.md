@@ -37,6 +37,8 @@
 | Transport 发送端 | 2026-09-10 | [INTRA、SHM、RTPS 生命周期同步与重入](#2026-09-10-发送端生命周期同步) |
 | Discovery 自动发现 | 2026-08-27 | [INTRA、自动 XSI SHM、同机强制 RTPS](#2026-08-27-discovery-驱动的传输选择) |
 | Discovery 自动发现 | 2026-09-13 | [全新订阅进程发现修复、失败复现及 Demo 复验](#2026-09-13-discovery-全新订阅进程自动发现修复) |
+| QoS 策略 | 2026-09-14 | [TRANSIENT_LOCAL、历史与共享冲突；失败保留、30 程序回归、ASan 和 Demo 构建](#2026-09-14-qos-统一与历史策略回归) |
+| QoS 策略 | 2026-09-14 | [业务 VOLATILE、预设精简、缓存复用与 Discovery 晚加入；30 程序回归及 9 项 ASan 通过](#2026-09-14-业务-volatile-与-discovery-策略精简) |
 | Logger 日志 | 2026-09-11 | [统一日志目录、旧日志迁移与路径检查](#2026-09-11-统一日志目录) |
 | 通信 Demo | 2026-09-12 | [A～E、两轮完整运行、4 MiB 与 Ctrl+C](#2026-09-12-面试通信-demo-本地验收) |
 | 测试构建与执行器 | 2026-09-06 | [fast 13 过、integration 6 过 2 崩溃；runner 失败检测](#2026-09-06-测试集整理与首轮失败) |
@@ -2201,3 +2203,143 @@ git status --short
 历史 testlog 原文按前缀比对保留。补齐本摘要后再次执行
 `python3 log/discovery-20260913/audit_docs.py > log/discovery-20260913/audit-docs-final.log 2>&1`
 和 `git diff --check`，结果均为退出 0。
+
+
+## 2026-09-14 QoS 统一与历史策略回归
+
+分支 `dev`，HEAD `7c00e7f0f4e2ad6682b0181e030ce5a53dd7f42f`，在未提交的 QoS 修改上验证。
+日期使用 Asia/Shanghai；首个构建于 15:12 开始，完整 check 于 15:22 开始。
+环境：Linux `6.8.0-138-generic` x86_64，g++ `11.4.0`（Ubuntu 22.04），
+C++14、`-faligned-new`；Fast DDS `/home/jim/cpp/fastdds_2.12/install`（2.12）。
+除另有说明，SANITIZE/OPTFLAGS 未指定，GoogleTest 不作过滤；所有命令工作目录均为
+`/home/jim/cpp/CyberRT`。功能与兼容性见 [README](../README.md#qos-配置与执行边界)，
+用例职责见 [TESTING](TESTING.md#qos-回归)。
+
+实际执行命令，按顺序保留：
+
+```bash
+mkdir -p log/qos-20260914
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914 -j2 test_qos > log/qos-20260914/build-01.log 2>&1
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914 -j2 test_qos test_qos_rtps > log/qos-20260914/build-02.log 2>&1
+```
+
+- `build-01.log`：退出 2，新增 QosHistory 使用 `RecursiveTimedMutex` 时遗漏
+  `eprosima::fastrtps` 命名空间，未进入程序测试。
+- `build-02.log`：修正后退出 0，仅表示两个目标构建成功。
+
+```bash
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' bash example/run_tests.sh --bin-dir /home/jim/cpp/CyberRT/example/build-qos-20260914/bin --timeout 90 test_qos test_qos_rtps > log/qos-20260914/targeted-01.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir /home/jim/cpp/CyberRT/example/build-qos-20260914/bin --timeout 90 test_qos_rtps > log/qos-20260914/targeted-02.log 2>&1
+```
+
+- `targeted-01.log`：沙箱内运行，整体退出 1。`test_qos` 的 11 项全部通过；
+  RTPS 8 项因 `getifaddrs/open: Operation not permitted` 无法完成网络端点创建。
+  属于环境阻止启动，不是 RTPS 语义验证通过；runner 为 passed=1、failed=1、timed_out=0。
+- `targeted-02.log`：获得本机网络测试执行权限后，在独立 user/IPC namespace 运行，
+  退出 1。RTPS 7 项通过；`ReliableKeepAllRetriesAfterReaderCapacityBecomesAvailable`
+  在释放接收 History 空间后等不到第三条样本，8 秒等待失败。
+  排查发现原始端点夹具走 Fast DDS 的进程内直送；其 Writer 根据 `processDataMsg`
+  返回值处理投递状态，不能用来验证 UDP 拒收后的协议重传。后续夹具关闭
+  `INTRAPROCESS_FULL`，显式采用 `INTRAPROCESS_OFF` 和 UDPv4；没有增加应用重发。
+  这次失败记录保留，不把后续成功视为原进程内路径已修复。
+
+```bash
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914 -j2 tests demos > log/qos-20260914/build-03.log 2>&1
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914 -j2 tests demos > log/qos-20260914/build-04.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir /home/jim/cpp/CyberRT/example/build-qos-20260914/bin --timeout 90 test_qos_rtps > log/qos-20260914/targeted-03.log 2>&1
+```
+
+- `build-03.log`：退出 2，测试新增的 UDPv4TransportDescriptor 缺少
+  `eprosima::fastdds::rtps` 命名空间；构建未全部完成，没有运行测试。
+- `build-04.log`：修正后退出 0，全部正式测试和旧手工 demos 目标仅构建成功。
+- `targeted-03.log`：独立 IPC、允许本机网络，退出 0，RTPS 8 项全部通过。
+  包括 KEEP_LAST 两条保留深度、KEEP_ALL 满时连续拒绝且保留旧样本、可靠性匹配与拒绝、
+  Reader 保留容量、只发布一次的第三条样本在空间释放后由 RTPS 重传成功、
+  两种历史策略在全新 exec 接收进程中回放、两种创建顺序下共享 Reader 冲突拒绝。
+  原始端点用例为本机 UDPv4；生产回放用例为同机强制 RTPS 跨进程。
+
+```bash
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' unshare --user --map-root-user --ipc make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914 -j2 check > log/qos-20260914/check-01.log 2>&1
+```
+
+`check-01.log`：退出 0，快速组 passed=16、集成组 passed=14，failed=0、timed_out=0，
+最终 `check: PASSED`。采用 Makefile 默认单程序超时：fast 30 秒、integration 90 秒。
+快速组包含新增 `test_qos` 和扩展的 `test_node`（3 项），集成组包含新增 `test_qos_rtps`；
+同时覆盖已有 INTRA、跨进程 SHM、Loan、RTPS 生命周期和 Discovery 晚加入回归。
+这是同机环境、受控 host 元数据路由及同机强制 RTPS 的验证，未进行真实跨主机实验。
+未据此声称 SHM 可靠重传、SHM/INTRA 历史回放或慢回调无损。
+
+完整 check 后，将新增测试夹具中的 RoleAttributes 改为显式零初始化；运行库实现未再修改。
+随后执行以下构建，ASan 与 Demo 使用不同构建目录并行进行：
+
+```bash
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build/qos-asan-20260914 SANITIZE=address -j2 test_qos_rtps > log/qos-20260914/build-asan-01.log 2>&1
+make -C example -f demo/Makefile -j2 demo-transport > log/qos-20260914/build-demo-01.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir /home/jim/cpp/CyberRT/example/build/qos-asan-20260914/bin --timeout 90 test_qos_rtps > log/qos-20260914/asan-01.log 2>&1
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914 -j2 test_qos test_qos_rtps > log/qos-20260914/build-05.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir /home/jim/cpp/CyberRT/example/build-qos-20260914/bin --timeout 90 test_qos test_qos_rtps > log/qos-20260914/targeted-04.log 2>&1
+```
+
+- `build-asan-01.log`：退出 0，采用 Makefile 的 ASan/non-PIE/frame-pointer 配置。
+  Fast DDS 等外部库未重新插桩。
+- `build-demo-01.log`：退出 0，默认构建目录 `/home/jim/cpp/CyberRT/example/demo/build`。
+  仅确认新 Demo 构建成功，本轮没有运行 Demo A～E，不把它记为场景验收通过。
+- `asan-01.log`：独立 IPC、允许本机网络，退出 0，8 项 RTPS QoS 测试全部通过，
+  无 AddressSanitizer 错误；`detect_leaks=0`，不包含泄漏验证。
+- `build-05.log`：退出 0，仅重建两个初始化方式调整后的 QoS 测试。
+- `targeted-04.log`：退出 0，最终源码对应的 `test_qos` 11 项与 `test_qos_rtps` 8 项全部通过，
+  runner passed=2、failed=0、timed_out=0。没有重复执行其余未变的完整回归。
+
+所有输出重定向均在 [log/qos-20260914](../log/qos-20260914/)；程序 Logger 文件位于
+根目录 `log/`，没有迁移或覆盖用户正在查看的根目录 `PublisherTest.log`。
+
+## 2026-09-14 业务 VOLATILE 与 Discovery 策略精简
+
+分支 `dev`，HEAD `7c00e7f0f4e2ad6682b0181e030ce5a53dd7f42f`，在未提交工作区上验证。
+日期使用 Asia/Shanghai。环境：Linux `6.8.0-138-generic` x86_64、g++ `11.4.0`
+（Ubuntu 22.04）、C++14、`-faligned-new`；Fast DDS 位于
+`/home/jim/cpp/fastdds_2.12/install`（2.12）。所有命令工作目录为 `/home/jim/cpp/CyberRT`。
+普通构建未指定 SANITIZE/OPTFLAGS/FAST_DDS_HOME；ASan 沿用独立构建目录及 Makefile 配置。
+历史 TRANSIENT_LOCAL 验证记录保留；本轮最终语义见 [README](../README.md#qos-配置与执行边界)，
+测试使用方法见 [QoS 回归](TESTING.md#qos-回归)。
+
+本轮把业务默认值改为 VOLATILE，Discovery 显式保留 RELIABLE + TRANSIENT_LOCAL；
+删除六个未使用的场景预设、构造工厂与零值常量、示例中的重复默认赋值，以及业务回放测试的
+子进程框架。保留显式 RTPS TRANSIENT_LOCAL、历史容量和可靠重传验证。
+VOLATILE KEEP_ALL 在满载时允许回收已完成投递的最旧样本，未确认样本仍保留并对新发送返回 false。
+
+实际执行命令，普通构建及完整回归：
+
+```bash
+mkdir -p log/qos-volatile-20260914 && make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914 -j2 tests demos > log/qos-volatile-20260914/build-01.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' unshare --user --map-root-user --ipc make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914 -j2 check > log/qos-volatile-20260914/check-01.log 2>&1
+```
+
+- `build-01.log`：退出 0，正式测试及 Makefile 的旧手工 demos 目标构建成功；构建本身不计为测试通过。
+- `check-01.log`：退出 0，fast passed=16、integration passed=14，failed=0、timed_out=0，
+  最终 `check: PASSED`。每程序超时为 Makefile 默认 fast 30 秒、integration 90 秒，GoogleTest 无过滤。
+  `test_qos` 11 项、`test_node` 3 项、`test_qos_rtps` 9 项通过，同时运行其余正式回归。
+- RTPS 原始端点经本机 UDPv4、关闭 Fast DDS 进程内直送：VOLATILE Reader 对 VOLATILE 和
+  TRANSIENT_LOCAL Writer 均不补收匹配前的两条消息，能收到后发的第三条；KEEP_ALL 容量为 2 时
+  无 Reader 及收到 ACK 后均可继续发送。接收容量满载时第三、四条各仅发布一次，第五条被 Writer
+  拒绝；释放一个 Reader 槽位后第三条经协议重传到达，未靠应用重复发布。
+- Discovery KEEP_ALL 原始历史在容量满时保留公告，晚加入 Reader 能回放前两条；显式 RTPS
+  TRANSIENT_LOCAL KEEP_LAST 仍只保留配置深度。共享生产 RTPS Reader 冲突拒绝后原 listener 仍可收新消息。
+- `test_discovery_late_join`：三个全新进程均在 Reader JOIN 前发现原 Writer，业务 QoS 公告为 VOLATILE，
+  然后经自动 SHM 接收新消息，三轮均 PASS。Publisher PID 为 `308624`，Writer ID 为
+  `2932741003498723756`；没有依赖业务历史回放或应用 Writer 重公告。
+
+随后另行构建并运行 ASan：
+
+```bash
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build/qos-asan-20260914 SANITIZE=address -j2 test_qos_rtps > log/qos-volatile-20260914/build-asan-01.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir /home/jim/cpp/CyberRT/example/build/qos-asan-20260914/bin --timeout 90 test_qos_rtps > log/qos-volatile-20260914/asan-01.log 2>&1
+```
+
+- `build-asan-01.log`：退出 0，使用 Makefile 的 ASan/non-PIE/frame-pointer 配置；外部 Fast DDS 未重新插桩。
+- `asan-01.log`：退出 0，9 项 RTPS QoS 用例全部通过，无 AddressSanitizer 错误；
+  runner passed=1、failed=0、timed_out=0。`detect_leaks=0`，不包含泄漏检查。
+
+输出重定向均位于 [log/qos-volatile-20260914](../log/qos-volatile-20260914/)，运行库日志位于根目录 `log/`。
+本轮范围为同机 INTRA、跨进程 SHM、同机强制 RTPS 和受控 host 元数据选路；
+未做真实跨主机实验、业务 INTRA/SHM 历史补发、SHM 可靠重传或 Demo A～E 场景验收。

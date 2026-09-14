@@ -20,6 +20,8 @@ void Transport::Shutdown()
         return ;
     }
 
+    // Stop reader callbacks and release their histories before the participant.
+    if (rtps_dispatcher_ != nullptr) rtps_dispatcher_->Shutdown();
     if(participant_ != nullptr)
     {
         participant_->Shutdown();

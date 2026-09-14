@@ -25,6 +25,8 @@ Manager::Manager()
       change_type_(ChangeType::CHANGE_PARTICIPANT),
       channel_name_(""),
       writer_(nullptr),
+      writer_history_(nullptr),
+      reader_history_(nullptr),
       reader_(nullptr),
       listener_(nullptr) {
   host_name_ = common::GlobalData::Instance()->HostName();
@@ -63,13 +65,19 @@ void Manager::StopDiscovery(){
         if(writer_ != nullptr){
             //从rtpsRTPSDomain 中移除writer
             eprosima::fastrtps::rtps::RTPSDomain::removeRTPSWriter(writer_);
+            writer_ = nullptr;
         }
+        delete writer_history_;
+        writer_history_ = nullptr;
     }
 
     if(reader_ != nullptr){
         //从rtpsRTPSDomain 中移除reader
         eprosima::fastrtps::rtps::RTPSDomain::removeRTPSReader(reader_);
+        reader_ = nullptr;
     }
+    delete reader_history_;
+    reader_history_ = nullptr;
 
     if(listener_ != nullptr){
         delete listener_;
@@ -146,19 +154,18 @@ bool Manager::CreateReader(RtpsParticipant* participant){
 
     RtpsReaderAttributes reader_attr;
 
-    AttributesFiller::FillInReaderAttr(
-                channel_name_ , QosProfileConf::QOS_PROFILE_TOPO_CHANGE , &reader_attr);
-
-    // registerReader advertises QoS but does not configure the RTPS endpoint.
-    // Discovery needs the reliable, durable reader promised by TOPO_CHANGE.
-    reader_attr.ratt.endpoint.reliabilityKind = RELIABLE;
-    reader_attr.ratt.endpoint.durabilityKind = TRANSIENT_LOCAL;
+    if (!AttributesFiller::FillInReaderAttr(
+                channel_name_, QosProfileConf::QOS_PROFILE_TOPO_CHANGE, &reader_attr))
+      return false;
 
     listener_ = new ReaderListener(
             std::bind(&Manager::OnRemoteChange, this , std::placeholders::_1));
-    eprosima::fastrtps::rtps::ReaderHistory* mp_history = new ReaderHistory(reader_attr.hatt);
+    reader_history_ = new QosReaderHistory(
+        reader_attr.hatt, QosProfileConf::QOS_PROFILE_TOPO_CHANGE);
 
-    reader_ = RTPSDomain::createRTPSReader(participant , reader_attr.ratt , mp_history ,listener_);
+    reader_ = RTPSDomain::createRTPSReader(participant, reader_attr.ratt,
+                                         reader_history_, listener_);
+    if (!reader_) return false;
 
     bool reg = participant->registerReader(reader_ , reader_attr.Tatt , reader_attr.Rqos);
     return reg;
@@ -169,18 +176,16 @@ bool Manager::CreateWriter(RtpsParticipant* participant){
     // 创建 RtpsWriter 的配置信息实例
     RtpsWriterAttributes writer_attr; 
     // 填充 RtpsWriter 的配置信息
-    AttributesFiller::FillInWriterAttr(
-        channel_name_, QosProfileConf::QOS_PROFILE_TOPO_CHANGE,&writer_attr);
-
-    // Keep old topology announcements available to newly started processes.
-    // Apply TOPO_CHANGE to the actual endpoint as well as the advertised QoS.
-    writer_attr.watt.endpoint.reliabilityKind = RELIABLE;
-    writer_attr.watt.endpoint.durabilityKind = TRANSIENT_LOCAL;
+    if (!AttributesFiller::FillInWriterAttr(
+        channel_name_, QosProfileConf::QOS_PROFILE_TOPO_CHANGE, &writer_attr))
+      return false;
     
     //创建rtps writer history
-    writer_history_ = new WriterHistory(writer_attr.hatt);
+    writer_history_ = new QosWriterHistory(
+        writer_attr.hatt, QosProfileConf::QOS_PROFILE_TOPO_CHANGE);
     //创建rtps writer
     writer_ = RTPSDomain::createRTPSWriter(participant , writer_attr.watt , writer_history_);
+    if (!writer_) return false;
     //注册rtps writer
     bool reg = participant->registerWriter(writer_ , writer_attr.Tatt , writer_attr.Wqos);
 
@@ -204,7 +209,11 @@ void Manager::OnRemoteChange(const std::string& str_msg){
 
     serialize::DataStream ds(str_msg);
     //需要将str_msg 反序列化成ChangeMsg类型的msg
-    ds >> msg;
+    if (!ds.read(msg) || !config::NormalizeQosProfile(
+            msg.role_attr.qos_profile, &msg.role_attr.qos_profile)) {
+        AERROR << "Invalid or incompatible Discovery metadata";
+        return;
+    }
 
     //判断是否是同一进程
     if(IsFromSameProcess(msg)){
@@ -285,12 +294,12 @@ bool Manager::Write(const ChangeMsg& msg){
   }
   change->serializedPayload.length = static_cast<uint32_t>(size);
   std::memcpy(change->serializedPayload.data, ds.data(), size);
-  bool added = writer_history_->add_change(change);
+  eprosima::fastrtps::rtps::WriteParams params;
+  bool added = writer_history_->AddChange(change, params);
   if(!added) {
-    writer_->remove_older_changes(20);
-    added = writer_history_->add_change(change);
+    writer_->release_change(change);
+    AERROR << "Discovery history full or submission failed: " << channel_name_;
   }
-  if(!added) writer_->release_change(change);
   return added;
 }
 

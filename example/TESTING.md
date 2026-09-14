@@ -78,6 +78,7 @@ CMW_PATH="$PWD" bash example/run_tests.sh \
 | 程序 | 检查内容 |
 | --- | --- |
 | `test_serialize` | DataStream 边界、类型、截断和失败传播 |
+| `test_qos` | 默认值、预设、归一化和非法配置、RTPS 属性映射、心跳单位、元数据、独立缓存、慢消费者及共享 Receiver 冲突 |
 | `test_blocker`、`test_node`、`test_publisher_subscriber` | 基础 API、同进程消息字段往返 |
 | `test_transport_mode_selection` | 按 IP/PID 元数据选路 |
 | `test_shm_segment_robustness`、`test_shm_block_lease_generation` | Segment 边界、Lease、generation、通知完整性 |
@@ -91,6 +92,7 @@ CMW_PATH="$PWD" bash example/run_tests.sh \
 
 | 程序 | 检查内容 |
 | --- | --- |
+| `test_qos_rtps` | 历史容量、满载拒绝、可靠性匹配、接收端释放容量后的重传、跨 exec 晚加入回放、共享 RTPS Reader 冲突 |
 | `test_condition_notifier` | 槽位互斥、丢弃、绕环、并发、fork+exec 广播、布局拒绝 |
 | `test_shm_segment_exec` | POSIX/XSI 跨 exec 读写、重开、布局拒绝 |
 | `test_posix_segment_multiprocess` | POSIX 两进程读写、重开和清理 |
@@ -177,6 +179,37 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 开关只重编译本项目，不会重编译外部 Fast DDS；报告时说明外部库构建方式。
 TSan 不证明跨进程同步正确性；`unexpected memory mapping` 属于启动受阻，应保留失败记录。
 系统允许时可用 `setarch x86_64 -R` 仅对 TSan 进程复验，不能把未启动的尝试记为通过。
+
+## QoS 回归
+
+功能语义及兼容性以 [README](../README.md#qos-配置与执行边界) 为准。
+以下是可复用命令，实际结果另记 [testlog](testlog.md)：
+
+```bash
+BUILD_DIR="$PWD/example/build-qos"
+make -C example BUILD_DIR="$BUILD_DIR" -j2 test_qos test_qos_rtps test_node test_discovery_late_join
+CMW_PATH="$PWD" CMW_IP=127.0.0.1 GTEST_FILTER='*' \
+  unshare --user --map-root-user --ipc bash example/run_tests.sh \
+  --bin-dir "$BUILD_DIR/bin" --timeout 90 test_qos test_qos_rtps test_node test_discovery_late_join
+```
+
+- `test_qos` 不创建 DDS 网络端点，验证业务 VOLATILE / Discovery TRANSIENT_LOCAL 默认值、
+  属性映射和内存中的缓存行为。
+  慢消费者用例暂停 DataVisitor 消费再灌入突发消息，验证溢出后跳到最新消息；
+  这不是调度延迟或无损吞吐测试。
+- `test_node` 同时检查不同创建重载的默认值、独立观察深度、共享 QoS 冲突后的清理和重试。
+- `test_qos_rtps` 的底层 History 用例关闭 Fast DDS 进程内直送并使用 UDPv4，
+  覆盖 VOLATILE 晚加入只收新消息、KEEP_ALL 回收已完成投递的样本且保留未确认样本、
+  显式 TRANSIENT_LOCAL 的 KEEP_LAST 淘汰及 Discovery KEEP_ALL 满载拒绝与公告回放。
+  可靠性用例覆盖不匹配和匹配、接收端容量释放后的协议重传；被拒收的样本只发布一次。
+  生产 Transmitter/Receiver 用例验证共享 QoS 冲突不会替换原 listener。
+- 跨进程晚加入由 `test_discovery_late_join` 覆盖：全新进程在 Reader JOIN 前发现旧 Writer，检查业务公告为
+  VOLATILE，随后经自动 SHM 接收新消息。这不代表业务历史补发或真实跨主机验证。
+- 原始 DDS 端点先删除再释放 History，生产路径结束时 Shutdown Transport。
+  runner 为整个程序提供 90 秒超时和进程组清理；日志按根目录 `log/` 规则保存。
+
+依赖沿用上述 Fast DDS 2.12、GoogleTest、Linux UDP 和 `unshare` 环境；
+所有进程须使用本轮重新构建的二进制，不能用旧的六字段 QoS 程序参与验证。
 
 ## 性能程序
 

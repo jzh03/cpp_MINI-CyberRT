@@ -61,7 +61,8 @@ export CMW_PATH="$PWD"
 - 默认 SegmentFactory 创建 POSIX Segment；NotifierFactory 默认使用 ConditionNotifier。
 - 要强制后端，使用低层 Transport 的 `OptionalMode` 参数；Node 没有该参数。
 - `qos_profile.msg_size` 在 Loan 中作为请求容量限制，仍受 SHM 最大消息限制。
-- `qos_profile.depth` 与 Subscriber 的待处理队列大小不是同一个概念；不要只改一个值就声称消息不会丢失。
+- `qos_profile.depth`、`pending_queue_size`、`history_depth` 分别控制传输历史、回调队列、观察缓存。
+  默认值、零值、后端能力和元数据升级要求统一见 [QoS 配置与执行边界](../README.md#qos-配置与执行边界)。
 
 字段定义见 [qos_profile.h](qos_profile.h)，使用示例见 [Demo](../example/demo/README.md)。
 

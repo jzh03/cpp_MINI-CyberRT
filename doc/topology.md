@@ -66,7 +66,9 @@ const bool has_subscriber = publisher->HasSubscriber();
 2. Publisher 收到真实 LEAVE 后移除该 peer；只有最后一个同模式 peer 离开，才关闭对应发送后端。
 3. 新 Reader JOIN 后可重新启用后端。接收方还必须获得 Writer 信息，才能安装接收 listener。
 
-Discovery 的底层端点与公告 QoS 均采用 `RELIABLE + TRANSIENT_LOCAL`。
+Discovery 自身的 RTPS 端点与 DDS 端点公告采用 `RELIABLE + TRANSIENT_LOCAL`；
+公告正文中的业务端点 QoS 默认 `VOLATILE`。
+属性映射、KEEP_ALL 容量及元数据版本要求见 [统一 QoS 约定](../README.md#qos-配置与执行边界)。
 全新订阅进程可读取仍在线发布端保留的 Writer JOIN；Demo D 已去掉应用层重新公告。
 这恢复的是后续消息接收，不包含离线补发。[修复范围](../README.md#discovery-后启动进程发现)；
 [恢复操作](../example/demo/README.md#5-实现要点与验证边界)。

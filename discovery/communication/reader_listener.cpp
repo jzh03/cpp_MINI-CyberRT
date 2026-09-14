@@ -1,5 +1,7 @@
 
 #include <cmw/discovery/communication/reader_listener.h>
+#include <fastrtps/rtps/reader/RTPSReader.h>
+#include <fastrtps/rtps/history/ReaderHistory.h>
 
 namespace hnu {
 namespace cmw {
@@ -18,6 +20,8 @@ void ReaderListener::onNewCacheChangeAdded(
     const eprosima::fastrtps::rtps::CacheChange_t* const change){
     
     if(callback_ == nullptr){
+        reader->getHistory()->remove_change(
+            const_cast<eprosima::fastrtps::rtps::CacheChange_t*>(change));
         std::cout << "callback_ is nullptr" << std::endl;
         return;
     }
@@ -25,6 +29,8 @@ void ReaderListener::onNewCacheChangeAdded(
     std::lock_guard<std::mutex> lock(mutex_); 
     std::shared_ptr<std::string> msg_str = 
         std::make_shared<std::string>((char*)change->serializedPayload.data,change->serializedPayload.length);
+    reader->getHistory()->remove_change(
+        const_cast<eprosima::fastrtps::rtps::CacheChange_t*>(change));
     callback_(*msg_str);
 }
 

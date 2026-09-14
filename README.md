@@ -50,6 +50,79 @@ Node 的 Publisher/Subscriber 默认使用 HYBRID。Discovery 提供真实对端
 
 低层 `Transport::CreateTransmitter/CreateReceiver` 可显式选择 INTRA、SHM、RTPS、HYBRID；Node 没有显式模式参数。
 
+### QoS 配置与执行边界
+
+`QosProfile` 是默认值的唯一来源：`KEEP_LAST / depth=1 / mps=0 / msg_size=0 /
+RELIABLE / VOLATILE / max_samples=1000`。按频道名、RoleAttributes、SubscriberConfig
+创建业务端点均沿用它；晚加入者接收匹配后的新消息，不补发加入前的业务消息。
+只发布一次的初始化信息或只在变化时发布的状态，需要应用提供查询或周期同步。
+Discovery 独立使用 `KEEP_ALL + RELIABLE + TRANSIENT_LOCAL`，保留拓扑公告供后启动进程发现端点。
+
+命名预设仅保留 `QOS_PROFILE_DEFAULT` 和 `QOS_PROFILE_TOPO_CHANGE`。删除未使用的
+`SENSOR_DATA / PARAMETERS / SERVICES_DEFAULT / PARAM_EVENT / SYSTEM_DEFAULT / TF_STATIC`
+场景预设、`CreateQosProfile` 工厂及两个零值常量；原调用者改为构造 `QosProfile` 后设置所需字段。
+仍支持显式选择 `BEST_EFFORT` 或 `TRANSIENT_LOCAL`，后者的业务回放能力限于显式 RTPS 后端。
+
+`NormalizeQosProfile` 将三个 `SYSTEM_DEFAULT` 枚举解析为项目默认值；传输 `depth=0`
+解析为 1。非法枚举、零/溢出的 `max_samples`、超过资源上限的 KEEP_LAST depth、
+以及会使 RTPS 缓冲大小溢出的 `msg_size` 均拒绝。Node/Transport 工厂返回空指针并记录原因，
+直接构造底层 Endpoint 派生类时抛出 `std::invalid_argument`；RTPS 属性填充失败不会继续创建端点。
+
+RTPS 的底层 Reader/Writer 属性与 Discovery 公告采用同一映射。项目使用底层 RTPS API，
+因此由 `QosWriterHistory/QosReaderHistory` 执行历史策略，而非依赖 TopicAttributes 自动执行：
+
+| 策略 | Writer | Reader |
+| --- | --- | --- |
+| KEEP_LAST | 最多保留 depth 条；提交新样本时淘汰最旧样本，淘汰也结束该样本的重传/回放窗口 | 最多保留 depth 条待交付历史；满时淘汰最旧项 |
+| KEEP_ALL | 忽略 depth，最多保留 max_samples 条；满时 VOLATILE 可回收已完成投递的最旧样本，否则新发送返回 false | 最多保留 max_samples 条待交付历史；满时拒收，RELIABLE 可在空间释放后重传 |
+
+RTPS listener 复制 Payload 和元数据后立即消费 ReaderHistory 中的样本，再向下游分发。
+History 内存池额外允许一个替换用缓存，预分配最多 16 个，不代表额外的保留深度。
+VOLATILE 不等于没有缓存：RELIABLE 仍需为已匹配 Reader 保留重传窗口。
+KEEP_ALL 在需要空间时检查最旧样本的投递状态；不会为新消息淘汰尚未确认的样本。
+TRANSIENT_LOCAL Writer 保留已确认样本供晚加入者回放；其 KEEP_ALL 达到上限后不会因 ACK
+腾出保留历史，须结束该 Writer 生命周期后重建。Discovery 受默认 1000 条保留上限约束，
+广播失败会记录错误；本地拓扑变更仍不回滚，不提供容量耗尽后的全量状态重建。
+
+`mps` 仅为可靠 RTPS Writer 的心跳提示，不是发送限速：0 保留 Fast DDS 默认心跳，
+非零值夹在 64～1024，心跳周期为 `256 / mps` 秒，以秒和纳秒正确拆分。
+`msg_size` 是 Loan 请求容量约束及 RTPS 预分配提示，不是普通序列化消息的统一硬上限。
+
+Subscriber 的三种容量独立配置：
+
+| 字段 | 默认值与零值 | 控制对象 |
+| --- | --- | --- |
+| `qos_profile.depth` | 默认 1；0 解析为 1；KEEP_ALL 忽略此值 | RTPS 传输历史 |
+| `pending_queue_size` | 默认 1；0 或超过 int32_t 范围拒绝 | 回调待处理队列；消费者落后越过缓存时跳到最新消息 |
+| `history_depth` | 默认 1；0 禁用观察保留 | Blocker 观察缓存；`SetHistoryDepth()` 仍只修改此缓存 |
+
+例如 `SubscriberConfig cfg; cfg.channel_name = "sensor"; cfg.pending_queue_size = 8;
+cfg.history_depth = 0;` 可在处理回调的同时不保留观察引用。直接构造 Subscriber 时，
+第四个参数为观察深度。旧代码通过 `qos_profile.depth` 控制观察缓存的，需要改用
+`history_depth` 或 `SetHistoryDepth()`；Demo C 已改为显式关闭观察缓存。
+
+同进程、同消息类型、同频道的 Node Subscriber 共享 Receiver，底层 RTPS Reader 也按频道共享。
+复用要求归一化后的完整传输 QoS 相同，否则创建失败，保留先前的端点和回调。
+观察深度和待处理队列可以各自不同。缓存的 Receiver/RTPS Reader 在进程生命周期内保留，
+即使用户 Subscriber 已离开，也不能用不同 QoS 重新占用该频道。HYBRID 配对检查 Writer 提供的
+可靠性和持久性是否满足 Reader 请求；不兼容时拒绝启用该 peer 并记录原因。
+
+| 后端 | 当前实际保证 |
+| --- | --- |
+| INTRA | 直接分发共享引用；无发送历史回放，调度队列仍可能丢弃 |
+| SHM | 块和通知允许失败、覆盖、丢弃；未实现可靠重传及晚加入回放 |
+| RTPS | 默认 VOLATILE 只接收匹配后的新消息；RELIABLE 在保留历史窗口内提供协议重传；显式 TRANSIENT_LOCAL 可回放仍在线且未关闭 Writer 的保留样本 |
+| HYBRID | 按实际后端提供上述能力；无 peer 时不缓存消息，最后一个对应模式 peer 离开会关闭发送后端及其历史 |
+
+业务默认不承诺晚加入或离线补发；Discovery 的历史公告不等于业务历史消息。
+发送成功也不等于应用回调已处理。针对性验证入口见 [QoS 回归](example/TESTING.md#qos-回归)。
+
+兼容性：`QosProfile` 的序列化在原六字段后追加 `max_samples`，改变了 RoleAttributes/
+Discovery 元数据格式。所有互通进程须一起升级并重新构建，不支持与旧二进制混用。
+此前显式设置为 TRANSIENT_LOCAL 的业务 Reader 若连接默认 VOLATILE Writer，会因 QoS 不兼容而无法匹配；
+采用新默认策略时须同步调整这些业务端点配置。
+SHM 段布局及应用 Payload 序列化格式没有因此变更。
+
 ### LoanedMessage 零拷贝
 
 发送接口是 `AcquireMessage(capacity)` → 填充 `mutable_data()` → `set_size()` → `Publish(std::move(message))`。
@@ -135,10 +208,12 @@ ConditionNotifier 使用 4096 槽位广播环，采用发布短锁和槽位互�
 
 ### Discovery 后启动进程发现
 
-Discovery 的底层 Reader/Writer 使用 `RELIABLE + TRANSIENT_LOCAL`，与公告中的 QoS 一致。
+Discovery 自身的 RTPS Reader/Writer 及其 DDS 端点公告均使用 `RELIABLE + TRANSIENT_LOCAL`；
+公告正文携带的业务端点 QoS 独立配置，默认 `VOLATILE`。
 修复前只设置了公告 QoS，实际端点仍使用 BEST_EFFORT，Reader 还是 VOLATILE，全新进程可能漏掉旧 Writer JOIN。
 现在新订阅进程可通过保留的拓扑历史发现仍在线的发布者，无需应用重新公告。
-普通 RTPS 消息的 QoS、SHM 布局和锁策略不变；拓扑 History 仍有容量限制，本次未覆盖历史公告淘汰后的状态重建。
+普通 RTPS 消息现已采用[统一 QoS 映射与历史策略](#qos-配置与执行边界)；SHM 布局和锁策略不变。
+拓扑 History 仍有容量限制，不提供历史不足或容量耗尽后的全量状态重建。
 [针对性回归](example/TESTING.md#全新订阅进程自动发现回归)。
 
 ### 面试通信 Demo
