@@ -13,6 +13,10 @@
 脚本自动构建并演示 A～E，约 3 分钟（首次编译另计）。看到 `[RESULT] PASS requested=all` 表示完整演示通过。
 需要 `unshare` 支持；依赖检查见 [Fast DDS 环境](doc/fastrtps.md)，单场景和双终端操作见 [Demo 指南](example/demo/README.md)。
 
+普通程序、测试、benchmark 和测试插件的编译产物统一保存在 `example/build/`，
+不同编译配置使用其子目录；通信 Demo 单独使用 `example/demo/build/`。
+构建入口拒绝其他 `BUILD_DIR`，操作示例见 [测试指南](example/TESTING.md#选择正确的入口)。
+
 ## 文档导航
 
 | 想做什么 | 看这里 |
@@ -49,6 +53,56 @@ Node 的 Publisher/Subscriber 默认使用 HYBRID。Discovery 提供真实对端
 - 不提供自动 fallback、失败重试或离线补发。多路径发送可能部分成功但整体返回 false，不回滚已投递消息。
 
 低层 `Transport::CreateTransmitter/CreateReceiver` 可显式选择 INTRA、SHM、RTPS、HYBRID；Node 没有显式模式参数。
+
+### 消息类型与初始化失败
+
+Node 工厂自动填充 `RoleAttributes::message_type`；Discovery 在 JOIN 入表之前原子地检查同频道
+Writer/Reader 类型，不兼容或空类型不会入表、通知业务或广播。HYBRID 启用 peer 时再次检查类型。
+本地发现的冲突使 Publisher/Subscriber 工厂返回空指针；远端冲突公告被拒绝。
+Reader LEAVE 同时删除按节点和按频道维护的索引。
+
+跨程序使用的消息应声明稳定名称与正整数版本，例如（特化必须在创建端点前可见）：
+
+```cpp
+#include <cmw/config/message_type.h>
+
+namespace hnu { namespace cmw { namespace config {
+template <> struct MessageTypeTrait<MyMessage> {
+  static const char* Name() { return "robot.sensor.MyMessage"; }
+  static uint32_t Version() { return 1; }
+};
+}}}
+```
+
+生成的标识为 `cmw.schema/robot.sensor.MyMessage@1`，名称、版本必须完全相同；版本变化需同步升级。
+只设置名称或版本会被拒绝。未特化时保留调用者显式提供的非空标识，否则使用带编译器版本的
+C++ 类型签名作为同构构建检查；它不能检测同名结构体字段变化，也不构成可移植 schema 或自动版本转换。
+同频道接收器缓存保留期间不能切换消息类型，即使最后一个 Subscriber 已退出。
+旧程序的空类型公告不再接纳，互通端点需一起重建。显式低层 RTPS 接口使用固定 underlay 类型，
+绕过 Node/Discovery 的直接调用仍由应用保证语义类型一致。
+
+Discovery 创建 Participant、Writer 或 Reader 失败会回收已建资源；`CreateNode()` 在 Discovery
+不可用时返回空指针，调用者须检查返回值。修复环境后可显式调用 `TopologyManager::Init()` 重试。
+显式关闭先停止并等待在途 Discovery 回调，再关闭端点与 Participant，最后释放 listener；重复关闭安全。
+生命周期切换须由回调之外的控制线程发起；重建前仍须停止业务、释放原 Node/端点，不能与活跃业务任意交错。
+
+普通 RTPS 消息的两个分发适配器都检查完整字段解码结果；空指针、截断、类型标记错误不会进入业务回调。
+允许解码对象之后存在额外字节，以保留既有 DataStream 行为。
+
+### 队列与线程调度同步
+
+`BoundedQueue` 使用预分配槽位和互斥锁实现有界 MPMC，槽位复制/移动与索引推进处于同一临界区，
+不承诺无锁吞吐。等待采用通知代次与条件变量谓词，避免检查队列到休眠之间丢失唤醒。
+`BreakAllWait()` 是终止操作：唤醒等待者、拒绝新入队，仍可取出剩余元素；初始化及更换等待策略须在无并发访问时进行。
+ThreadPool/TaskManager 满队列或停止后拒绝任务，返回无效 future，调用者应先检查 `valid()`。
+协程状态和停止标志使用原子同步；调度通知即使发生在 READY 切入 DATA_WAIT 之前也会保留，
+Remove 等待正在执行的协程让出后再移除。
+
+线程 `range` 绑定整个 CPU 集，`1to1` 按索引绑定其中一个 CPU；CPU 列表、实际 affinity 和系统调用结果均检查。
+FIFO/RR 传入配置的实时优先级，权限或参数失败明确返回 false；SCHED_OTHER 的 nice 值作用于实际 Linux tid。
+`SetInnerThreadAttr(name, thread, tid)` 返回 bool，配置 SCHED_OTHER 时必须提供目标 tid。
+SchedulerClassic 的资源配置失败会抛出异常终止创建，不再记录虚假的成功。
+设置调度策略与 nice 是两个系统调用，后者失败可能已改变策略；这些配置不构成硬实时保证。
 
 ### QoS 配置与执行边界
 
@@ -166,15 +220,23 @@ Signal Disconnect 不是回调完成屏障，捕获对象须保持存活。底�
 块被占用时最多扫描一轮，失败不无限等待；重建后再次检查容量。
 读取先验证块和 generation，失败则丢弃。MessageInfo 序号使用 `memcpy` 编解码，避免未对齐访问。
 
-### 共享区布局 v2 与兼容性
+<a id="共享区布局-v2-与兼容性"></a>
+
+### 共享区布局 v3 与兼容性
 
 共享区中的 State、Block、ReadableInfo、Indicator 不包含进程私有虚表指针。
 Segment 打开前校验实际段长、版本、ABI、容量及 Payload 边界；拒绝不兼容段时不修改引用计数或删除旧段。
 
-- 共享 Payload 段为 **v2**，Notifier 有独立版本，不能混为一谈。
+- 共享 Payload 段为 **v3**，Notifier 有独立版本，不能混为一谈。
 - 不支持旧布局混用、在线迁移、跨 ABI 或其他进程并发截断映射。
 - 升级前停止相关进程，确认确切 POSIX 段名或 XSI key/shmid，再处理对应旧段；不要全局清空 `/dev/shm` 或批量 `ipcrm`。
 - 本地测试可用独立 IPC 环境避开旧通知区，见 [测试指南](example/TESTING.md#环境与清理)。
+
+v3 保留对象尺寸，但改变挂接/删除协议：创建者先持有一个引用，打开者用 CAS 获取存活引用；
+最后一个持有者用同一原子量把引用从 1 封闭为 closing，只有成功者可删除段名。
+已 mmap 但尚未获取引用的打开者不能复活 closing 段，必须释放该映射、让后续操作重新打开。
+这避免最后一个发送端关闭与接收端首次挂接交错时，接收器缓存已被删除的旧映射。
+v2 二进制仍使用旧引用协议，因此必须整体升级；这不是进程崩溃后的引用回收机制。
 
 布局定位：分配量为 `4096 + 1024 + (1024 + block_buf_size) * block_num`；Payload 起点为
 `sizeof(State) + block_num * sizeof(Block)`，步长为 `block_buf_size`。尾部元数据复制到本地后校验，不依赖 State 或对齐的尾标记起点；ReadableInfo 的 `reserved_` 保持零值。

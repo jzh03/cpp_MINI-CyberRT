@@ -19,6 +19,9 @@ public:
     explicit ReaderListener(const NewMsgCallback& callback);
     virtual ~ReaderListener();
 
+    // Prevent new callbacks and wait for an in-flight callback to finish.
+    void Stop();
+
     void onNewCacheChangeAdded(
             eprosima::fastrtps::rtps::RTPSReader* reader,
             const eprosima::fastrtps::rtps::CacheChange_t* const change) override;

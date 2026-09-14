@@ -1,5 +1,3 @@
 /example/build/
 /log/**/*.log
-/example/build-benchmark/
-/example/build-qos-20260914/
 /log/**/

@@ -6,7 +6,14 @@ FAST_DDS_HOME     ?= $(HOME)/cpp/fastdds_2.12/install
 FAST_DDS_INC_DIR  := $(FAST_DDS_HOME)/include
 FAST_DDS_LIB_DIR  := $(FAST_DDS_HOME)/lib
 
-BUILD_DIR         ?= $(CURDIR)/build
+BUILD_ROOT        := $(PROJECT_ROOT)/example/build
+BUILD_DIR         ?= $(BUILD_ROOT)
+override BUILD_DIR := $(abspath $(BUILD_DIR))
+# The communication demo retains its own directory; all other configurations
+# belong to build/ or a child of build/.
+ifeq ($(filter $(BUILD_ROOT) $(BUILD_ROOT)/% $(PROJECT_ROOT)/example/demo/build,$(BUILD_DIR)),)
+$(error BUILD_DIR must be under $(BUILD_ROOT); demo/Makefile uses example/demo/build)
+endif
 OBJ_DIR           := $(BUILD_DIR)/obj
 BIN_DIR           := $(BUILD_DIR)/bin
 COMPAT_INC_DIR    := $(BUILD_DIR)/include
@@ -92,7 +99,10 @@ FAST_TEST_TARGETS := test_qos test_serialize test_blocker test_node \
                      test_shm_dispatcher_robustness test_shm_transmitter_receiver \
                      test_shm_loaned_message test_shm_transmitter_lifecycle_regression \
                      test_loaned_message_hybrid test_hybrid_intra \
-                     test_intra_transmitter_lifecycle test_logger_paths
+                     test_intra_transmitter_lifecycle test_logger_paths \
+                     test_queue_regression test_croutine_concurrency test_scheduler_concurrency \
+                     test_scheduler_attributes test_rtps_dispatcher_decode \
+                     test_message_type test_channel_lifecycle
 INTEGRATION_TEST_TARGETS := test_qos_rtps test_condition_notifier test_shm_segment_exec test_posix_segment_multiprocess \
                             test_loaned_message_dynamic_shm_lifecycle \
                             test_shm_loaned_message_multiprocess \
@@ -103,7 +113,7 @@ INTEGRATION_TEST_TARGETS := test_qos_rtps test_condition_notifier test_shm_segme
                             test_loaned_message_rtps_multiprocess \
                             test_rtps_transmitter_lifecycle \
                             test_loaned_message_discovery_churn \
-                            test_discovery_late_join
+                            test_discovery_late_join test_discovery_lifecycle
 FORMAL_TEST_TARGETS := $(FAST_TEST_TARGETS) $(INTEGRATION_TEST_TARGETS)
 
 # Hand-operated programs and diagnostics remain buildable, but are never run
@@ -116,7 +126,8 @@ LEGACY_TEST_TARGETS := test_node_manager test_channel_manager test_croutine \
 ALL_TEST_TARGETS := $(FORMAL_TEST_TARGETS) $(DEMO_TEST_TARGETS) \
                     $(LEGACY_TEST_TARGETS)
 BENCHMARK_TARGETS := shm_segment_benchmark shm_benchmark_sender shm_benchmark_receiver
-CLASS_LOADER_PLUGIN_DIR := $(PROJECT_ROOT)/class_loader/test
+CLASS_LOADER_PLUGIN_SOURCE_DIR := $(PROJECT_ROOT)/class_loader/test
+CLASS_LOADER_PLUGIN_DIR := $(BUILD_DIR)/class_loader
 CLASS_LOADER_PLUGINS := $(CLASS_LOADER_PLUGIN_DIR)/libplugin1.so \
                         $(CLASS_LOADER_PLUGIN_DIR)/libplugin2.so
 
@@ -140,9 +151,9 @@ FAST_DDS_REQUIRED := \
 
 -include $(DEPENDENCY_FILES)
 
-.PHONY: all publisher subscriber tests demos benchmarks check check-fast \
+.PHONY: all publisher subscriber tests demos benchmarks class-loader-plugins check check-fast \
         check-integration $(ALL_TEST_TARGETS) $(BENCHMARK_TARGETS) \
-        check-fastdds clean
+        check-fastdds clean clean-class-loader-plugins
 .SECONDARY: $(TEST_CORE_OBJS) \
             $(addprefix $(OBJ_DIR)/example/,$(addsuffix .o,$(ALL_TEST_TARGETS)))
 
@@ -188,6 +199,8 @@ $(BENCHMARK_TARGETS): %: $(BIN_DIR)/%
 
 test_class_loader: $(CLASS_LOADER_PLUGINS)
 
+class-loader-plugins: $(CLASS_LOADER_PLUGINS)
+
 check-fastdds:
 	@for file in $(FAST_DDS_REQUIRED); do \
 		test -e "$$file" || { echo "Missing Fast DDS file: $$file" >&2; exit 1; }; \
@@ -200,6 +213,7 @@ $(SUBSCRIBER_BIN): $(SUBSCRIBER_CORE_OBJS) $(SUBSCRIBER_OBJ) Makefile | check-fa
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
 
 $(BIN_DIR)/test_class_loader: LDFLAGS += -Wl,--export-dynamic
+$(OBJ_DIR)/example/test_class_loader.o: CPPFLAGS += -DCMW_TEST_PLUGIN_DIR='"$(CLASS_LOADER_PLUGIN_DIR)"'
 
 # Notifier tests need no DDS or scheduler; keep sanitizer runs focused.
 $(BIN_DIR)/test_condition_notifier: $(OBJ_DIR)/transport/shm/condition_notifier.o $(OBJ_DIR)/transport/shm/readable_info.o $(OBJ_DIR)/log/logger.o $(OBJ_DIR)/example/test_condition_notifier.o Makefile | $(BIN_DIR)
@@ -208,6 +222,24 @@ $(BIN_DIR)/test_condition_notifier: $(OBJ_DIR)/transport/shm/condition_notifier.
 # Logger path checks need no transport, Discovery, or scheduler runtime.
 $(BIN_DIR)/test_logger_paths: $(OBJ_DIR)/log/logger.o $(OBJ_DIR)/example/test_logger_paths.o Makefile | $(BIN_DIR)
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) -lpthread -lgtest
+
+# Keep queue and thread-attribute regressions independent of DDS and the
+# coroutine runtime, including sanitizer builds. Linker wrappers only affect
+# this test binary and let it check syscall failure/argument handling.
+$(BIN_DIR)/test_queue_regression: $(OBJ_DIR)/example/test_queue_regression.o Makefile | $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) -lpthread
+
+$(BIN_DIR)/test_scheduler_attributes: $(OBJ_DIR)/scheduler/common/pin_thread.o $(OBJ_DIR)/log/logger.o $(OBJ_DIR)/example/test_scheduler_attributes.o Makefile | $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -Wl,--wrap=pthread_setschedparam -Wl,--wrap=setpriority -o $@ $(filter %.o,$^) -lpthread -lgtest
+
+$(BIN_DIR)/test_message_type: $(OBJ_DIR)/log/logger.o $(OBJ_DIR)/example/test_message_type.o Makefile | $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) -lpthread -lgtest
+
+CROUTINE_TEST_OBJS := $(addprefix $(OBJ_DIR)/,croutine/croutine.o \
+    croutine/croutine_context.o croutine/swap_x86_64.o common/global_data.o \
+    common/file.o config/conf_parse.o log/logger.o)
+$(BIN_DIR)/test_croutine_concurrency: $(CROUTINE_TEST_OBJS) $(OBJ_DIR)/example/test_croutine_concurrency.o Makefile | $(BIN_DIR)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) -lpthread -latomic
 
 $(BIN_DIR)/test_%: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/test_%.o Makefile | check-fastdds $(BIN_DIR)
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS) -lgtest
@@ -218,8 +250,11 @@ $(BIN_DIR)/shm_segment_benchmark: $(TEST_CORE_OBJS) $(OBJ_DIR)/example/shm_segme
 $(BIN_DIR)/shm_benchmark_%: $(PUBLISHER_CORE_OBJS) $(OBJ_DIR)/example/shm_benchmark_%.o Makefile | check-fastdds $(BIN_DIR)
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
 
-$(CLASS_LOADER_PLUGIN_DIR)/lib%.so: $(CLASS_LOADER_PLUGIN_DIR)/%.cc | $(CMW_INCLUDE_LINK)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared -fPIC -o $@ $^ -lpthread -ldl
+$(CLASS_LOADER_PLUGIN_DIR)/lib%.so: $(CLASS_LOADER_PLUGIN_SOURCE_DIR)/%.cc Makefile | $(CMW_INCLUDE_LINK)
+	@mkdir -p $(CLASS_LOADER_PLUGIN_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared -fPIC -o $@ $< -lpthread -ldl
+
+-include $(CLASS_LOADER_PLUGINS:.so=.d)
 
 $(OBJ_DIR)/%.o: $(PROJECT_ROOT)/%.cpp Makefile | $(CMW_INCLUDE_LINK)
 	@mkdir -p $(dir $@)
@@ -237,6 +272,8 @@ $(BIN_DIR):
 	@mkdir -p $@
 
 clean:
-	rm -rf $(BUILD_DIR)
-	rm -f $(CLASS_LOADER_PLUGINS)
+	@if test -d "$(BUILD_DIR)"; then rm -r -- "$(BUILD_DIR)"; fi
 	# Runtime logs and archived logs in $(PROJECT_ROOT)/log are retained.
+
+clean-class-loader-plugins:
+	@if test -d "$(CLASS_LOADER_PLUGIN_DIR)"; then rm -r -- "$(CLASS_LOADER_PLUGIN_DIR)"; fi

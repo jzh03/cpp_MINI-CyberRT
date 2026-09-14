@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include <cmw/config/transport_mode.h>
+#include <cmw/config/message_type.h>
 #include <cmw/transport/rtps/participant.h>
 #include <cmw/transport/transmitter/intra_transmitter.h>
 #include <cmw/transport/transmitter/rtps_transmitter.h>
@@ -39,6 +40,12 @@ class HybridTransmitter : public Transmitter<M> {
   }
 
   void Enable(const RoleAttributes& opposite_attr) override {
+    if (!config::IsMessageTypeCompatible(this->attr_.message_type,
+                                         opposite_attr.message_type)) {
+      AERROR << "Incompatible writer/reader message type: "
+             << this->attr_.channel_name;
+      return;
+    }
     if (!config::IsQosCompatible(this->attr_.qos_profile, opposite_attr.qos_profile)) {
       AERROR << "Incompatible writer/reader QoS: " << this->attr_.channel_name;
       return;

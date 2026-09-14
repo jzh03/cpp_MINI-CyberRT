@@ -20,7 +20,17 @@ bool Init(const char* binary_name){
 
 std::unique_ptr<Node> CreateNode(const std::string& node_name,
                                  const std::string& name_space) {
-    return std::unique_ptr<Node>(new Node(node_name, name_space));
+    if (node_name.empty()) {
+        AERROR << "Cannot create a Node with an empty name";
+        return nullptr;
+    }
+    std::unique_ptr<Node> node(new Node(node_name, name_space));
+    if (!node->IsValid()) {
+        AERROR << "Cannot create Node because topology initialization failed: "
+               << node_name;
+        return nullptr;
+    }
+    return node;
 }
 
 }

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <mutex>
 
 namespace hnu{
@@ -25,22 +26,36 @@ public:
     explicit State(const uint64_t& ceiling_msg_size);
     ~State();
 
-    //为啥不直接 fetch_sub 而要使用 cas 操作，想了一下应该是确保reference_count_的值不能小于0
-    void DecreaseReferenceCounts() {
-        uint32_t  current_reference_count = reference_count_.load();
-        do{
-            if(current_reference_count == 0)
-            {
-                return;
+    // An opener may map a segment before the last current owner starts
+    // removing its name.  It becomes an owner only if this CAS succeeds.
+    bool TryAcquireReference() {
+        uint32_t count = reference_count_.load(std::memory_order_acquire);
+        while(count != kClosingReferenceCount && count != 0 &&
+              count < kClosingReferenceCount - 1) {
+            if(reference_count_.compare_exchange_weak(
+                   count, count + 1, std::memory_order_acq_rel,
+                   std::memory_order_acquire)) {
+                return true;
             }
-        } while (!reference_count_.compare_exchange_strong(current_reference_count
-             , current_reference_count - 1));
- 
-        
+        }
+        return false;
     }
 
-    //增加引用计数
-    void IncreaseReferenceCounts() { reference_count_.fetch_add(1); }
+    // Returns true only to the owner that changes the last reference into the
+    // closing sentinel.  That owner alone is allowed to remove the OS object.
+    bool ReleaseReference() {
+        uint32_t count = reference_count_.load(std::memory_order_acquire);
+        while(count != kClosingReferenceCount && count != 0) {
+            const uint32_t next =
+                count == 1 ? kClosingReferenceCount : count - 1;
+            if(reference_count_.compare_exchange_weak(
+                   count, next, std::memory_order_acq_rel,
+                   std::memory_order_acquire)) {
+                return next == kClosingReferenceCount;
+            }
+        }
+        return false;
+    }
 
     uint32_t FetchAddSeq(uint32_t diff) { return seq_.fetch_add(diff); }
 
@@ -51,8 +66,15 @@ public:
     bool need_remap() { return need_remap_;}
     
     uint64_t ceiling_msg_size() { return ceiling_msg_size_.load(); }
-    //返回引用计数
-    uint32_t reference_counts() { return reference_count_.load(); }
+    uint32_t reference_counts() const {
+        const uint32_t count = reference_count_.load(std::memory_order_acquire);
+        return count == kClosingReferenceCount ? 0 : count;
+    }
+
+    bool is_closing() const {
+        return reference_count_.load(std::memory_order_acquire) ==
+               kClosingReferenceCount;
+    }
 
     bool TrySetMessageType(ShmMessageType message_type) {
         if(message_type == ShmMessageType::UNKNOWN) {
@@ -72,9 +94,13 @@ public:
 
     
 private:
+    static constexpr uint32_t kClosingReferenceCount =
+        std::numeric_limits<uint32_t>::max();
     std::atomic<bool> need_remap_ = {false};
     std::atomic<uint32_t> seq_ = {0};
-    std::atomic<uint32_t> reference_count_ = {0};
+    // Construction creates the first owner.  Zero is never an attachable
+    // state, and UINT32_MAX permanently seals this segment incarnation.
+    std::atomic<uint32_t> reference_count_;
     std::atomic<uint64_t> ceiling_msg_size_;
     std::atomic<uint8_t> message_type_ = {
         static_cast<uint8_t>(ShmMessageType::UNKNOWN)};

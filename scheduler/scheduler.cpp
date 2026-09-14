@@ -1,5 +1,6 @@
 
 #include <sched.h>
+#include <cstring>
 #include <utility>
 
 #include <cmw/scheduler/scheduler.h>
@@ -62,27 +63,37 @@ bool Scheduler::NotifyTask(uint64_t crid){
     return NotifyProcessor(crid);
 }
 
-void Scheduler::ProcessLevelResourceControl() {
+bool Scheduler::ProcessLevelResourceControl() {
   std::vector<int> cpus;
-  ParseCpuset(process_level_cpuset_, &cpus);
+  if (!ParseCpuset(process_level_cpuset_, &cpus)) return false;
+  if (cpus.empty()) return true;
   cpu_set_t set;
   CPU_ZERO(&set);
   for (const auto cpu : cpus) {
     CPU_SET(cpu, &set);
   }
-  pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+  const int status = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+  if (status != 0) {
+    AERROR << "Process affinity failed: " << std::strerror(status);
+    return false;
+  }
+  cpu_set_t actual;
+  CPU_ZERO(&actual);
+  return pthread_getaffinity_np(pthread_self(), sizeof(actual), &actual) == 0 &&
+         CPU_EQUAL(&set, &actual);
 }
 
-void Scheduler::SetInnerThreadAttr(const std::string& name, std::thread* thr) {
+bool Scheduler::SetInnerThreadAttr(const std::string& name, std::thread* thr, pid_t tid) {
   if (thr != nullptr && inner_thr_confs_.find(name) != inner_thr_confs_.end()) {
     auto th_conf = inner_thr_confs_[name];
     auto cpuset = th_conf.cpuset;
 
     std::vector<int> cpus;
-    ParseCpuset(cpuset, &cpus);
-    SetSchedAffinity(thr, cpus, "range");
-    SetSchedPolicy(thr, th_conf.policy, th_conf.prio);
+    if (!ParseCpuset(cpuset, &cpus) || !SetSchedAffinity(thr, cpus, "range"))
+      return false;
+    return SetSchedPolicy(thr, th_conf.policy, th_conf.prio, tid);
   }
+  return false;
 }
 
 void Scheduler::Shutdown() {

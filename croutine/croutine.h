@@ -84,14 +84,14 @@ class CRoutine{
                 std::chrono::steady_clock::now();
 
         RoutineFunc func_;
-        RoutineState state_;
+        std::atomic<RoutineState> state_{RoutineState::READY};
 
         std::shared_ptr<RoutineContext> context_;
 
         std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
         std::atomic_flag updated_ = ATOMIC_FLAG_INIT;
 
-        bool force_stop_ = false;
+        std::atomic<bool> force_stop_{false};
 
         int processor_id_ = -1;
         uint32_t priority_ = 0;
@@ -125,15 +125,21 @@ inline char **CRoutine::GetStack() { return &(context_->sp); }
 
 inline void CRoutine::Run() { func_(); }
 
-inline void CRoutine::set_state(const RoutineState &state) { state_ = state; }
+inline void CRoutine::set_state(const RoutineState &state) {
+  state_.store(state, std::memory_order_release);
+}
 
-inline RoutineState CRoutine::state() const { return state_; }
+inline RoutineState CRoutine::state() const {
+  return state_.load(std::memory_order_acquire);
+}
 
 inline std::chrono::steady_clock::time_point CRoutine::wake_time() const {
     return wake_time_;
 }
 
-inline void CRoutine::Wake() { state_ = RoutineState::READY; }
+inline void CRoutine::Wake() {
+  state_.store(RoutineState::READY, std::memory_order_release);
+}
 
 inline void CRoutine::HangUp() { CRoutine::Yield(RoutineState::DATA_WAIT); }
 
@@ -157,18 +163,20 @@ inline void CRoutine::set_processor_id(int processor_id) {
 }
 
 inline RoutineState CRoutine::UpdateState() {
-
-    if(state_ == RoutineState::SLEEP && 
-        std::chrono::steady_clock::now() > wake_time_){
-            state_ = RoutineState::READY;
-            return state_;
+    RoutineState current = state_.load(std::memory_order_acquire);
+    if(current == RoutineState::SLEEP &&
+       std::chrono::steady_clock::now() > wake_time_){
+        state_.store(RoutineState::READY, std::memory_order_release);
+        return RoutineState::READY;
     }
-    if(!updated_.test_and_set(std::memory_order_release)){
-        if(state_ == RoutineState::DATA_WAIT || state_ == RoutineState::IO_WAIT){
-            state_ = RoutineState::READY;
+    if(!updated_.test_and_set(std::memory_order_acq_rel)){
+        current = state_.load(std::memory_order_acquire);
+        if(current == RoutineState::DATA_WAIT ||
+           current == RoutineState::IO_WAIT){
+            state_.store(RoutineState::READY, std::memory_order_release);
         }
     }
-    return state_;
+    return state_.load(std::memory_order_acquire);
 }
 
 inline uint32_t CRoutine::priority() const { return priority_; }

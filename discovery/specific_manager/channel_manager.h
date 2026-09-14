@@ -3,12 +3,14 @@
 
 #include <unordered_set>
 #include <vector>
+#include <mutex>
 
 #include <cmw/discovery/container/graph.h>
 #include <cmw/discovery/container/multi_value_warehouse.h>
 #include <cmw/discovery/container/single_value_warehouse.h>
 #include <cmw/discovery/role/role.h>
 #include <cmw/discovery/specific_manager/manager.h>
+#include <cmw/config/message_type.h>
 
 namespace hnu {
 namespace cmw {
@@ -73,27 +75,31 @@ public:
     void GetMsgType(const std::string& channel_name, std::string* msg_type);
 
     bool HasWriter(const std::string& channel_name);
+    bool HasWriter(const RoleAttributes& attr);
     void GetWriters(RoleAttrVec* writers);
     bool HasReader(const std::string& channel_name);
+    bool HasReader(const RoleAttributes& attr);
     void GetReaders(RoleAttrVec* readers);
 
 
     bool IsMessageTypeMatching(const std::string& lhs, const std::string& rhs);
+    bool HasCompatibleMessageType(const std::string& channel_name,
+                                  const std::string& message_type);
     
 private:
 
     bool Check(const RoleAttributes& attr) override;
     //处理ChangeMsg
-    void Dispose(const ChangeMsg& msg) override;
+    bool Dispose(const ChangeMsg& msg) override;
 
     void OnTopoModuleLeave(const std::string& host_name, int process_id) override;
 
     
-    void DisposeJoin(const ChangeMsg& msg);
-    void DisposeLeave(const ChangeMsg& msg);
+    bool DisposeJoin(const ChangeMsg& msg);
+    bool DisposeLeave(const ChangeMsg& msg);
 
 
-    void ScanMessageType(const ChangeMsg& msg);
+    bool ScanMessageType(const ChangeMsg& msg);
     
 
     ExemptedMessageTypes exempted_msg_types_;
@@ -105,6 +111,9 @@ private:
     // key: channel_id
     WriterWarehouse channel_writers_;
     ReaderWarehouse channel_readers_;
+    // Serializes compatibility validation with insertion/removal so two
+    // concurrent, differently typed JOINs cannot both pass a stale scan.
+    mutable std::mutex topology_mutex_;
 };
 
 }

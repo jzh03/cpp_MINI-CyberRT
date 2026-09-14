@@ -33,14 +33,17 @@ void NodeManager::GetNodes(RoleAttrVec* nodes){
 }
 
 
-void NodeManager::Dispose(const ChangeMsg& msg){
+bool NodeManager::Dispose(const ChangeMsg& msg){
+    bool accepted = false;
     if(msg.operate_type == OperateType::OPT_JOIN){
-        DisposeJoin(msg);
+        accepted = DisposeJoin(msg);
     }else{
-        DisposeLeave(msg);
+        accepted = DisposeLeave(msg);
     }
+    if (!accepted) return false;
     //通知
     Notify(msg);
+    return true;
 }
 
 
@@ -67,7 +70,7 @@ void NodeManager::OnTopoModuleLeave(const std::string& host_name,
   }
 }
 
-void NodeManager::DisposeJoin(const ChangeMsg& msg){
+bool NodeManager::DisposeJoin(const ChangeMsg& msg){
 
     auto node = std::make_shared<RoleNode>(msg.role_attr , msg.timestamp);
     uint64_t key = node->attributes().node_id;
@@ -79,7 +82,7 @@ void NodeManager::DisposeJoin(const ChangeMsg& msg){
         if (!nodes_.Search(key, &existing_node)) {
             //如果没找到，则覆盖
             nodes_.Add(key, node);
-            return;
+            return true;
         }
 
         //到这里说明到了一个已经存在的existing_node
@@ -102,11 +105,13 @@ void NodeManager::DisposeJoin(const ChangeMsg& msg){
             //AsyncShutdown();
         }
     }
+    return true;
 }
 
-void NodeManager::DisposeLeave(const ChangeMsg& msg){
+bool NodeManager::DisposeLeave(const ChangeMsg& msg){
     auto node = std::make_shared<RoleNode>(msg.role_attr , msg.timestamp);
     nodes_.Remove(node->attributes().node_id);
+    return true;
 }
 
 }

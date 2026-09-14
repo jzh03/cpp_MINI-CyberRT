@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include <cmw/config/transport_mode.h>
+#include <cmw/config/message_type.h>
 #include <cmw/transport/receiver/intra_receiver.h>
 #include <cmw/transport/receiver/rtps_receiver.h>
 #include <cmw/transport/receiver/shm_receiver.h>
@@ -48,6 +49,12 @@ class HybridReceiver : public Receiver<M> {
 
  private:
   void EnableImpl(const RoleAttributes& opposite_attr, std::false_type) {
+    if (!config::IsMessageTypeCompatible(this->attr_.message_type,
+                                         opposite_attr.message_type)) {
+      AERROR << "Incompatible writer/reader message type: "
+             << this->attr_.channel_name;
+      return;
+    }
     if (!config::IsQosCompatible(opposite_attr.qos_profile, this->attr_.qos_profile)) {
       AERROR << "Incompatible writer/reader QoS: " << this->attr_.channel_name;
       return;

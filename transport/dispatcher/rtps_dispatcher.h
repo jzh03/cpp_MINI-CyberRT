@@ -55,6 +55,7 @@ public:
         participant_ = participant;
   }
 private:
+    friend class RtpsDispatcherTestAccess;
     template <typename MessageT>
     void AddListenerImpl(const RoleAttributes& self_attr,
                          const MessageListener<MessageT>& listener,
@@ -145,9 +146,13 @@ void RtpsDispatcher::AddListenerImpl(const RoleAttributes& self_attr,
 
     auto listener_adapter = [listener](const std::shared_ptr<std::string>& msg_str, 
                                        const MessageInfo& msg_info){
+            if (!msg_str) return;
             auto msg = std::make_shared<MessageT>();
             serialize::DataStream ds(*msg_str);
-            ds >> *msg;
+            if (!ds.read(*msg)) {
+                AERROR << "failed to deserialize RTPS message.";
+                return;
+            }
             listener(msg , msg_info);
     };
     //调用基类的AddListener来注册回调函数
@@ -198,9 +203,13 @@ void RtpsDispatcher::AddListenerImpl(const RoleAttributes& self_attr,
 
     auto listener_adapter = [listener](const std::shared_ptr<std::string>& msg_str, 
                                        const MessageInfo& msg_info){
+            if (!msg_str) return;
             auto msg = std::make_shared<MessageT>();
             serialize::DataStream ds(*msg_str);
-            ds >> *msg;
+            if (!ds.read(*msg)) {
+                AERROR << "failed to deserialize RTPS message.";
+                return;
+            }
             listener(msg , msg_info);
     };
     //调用基类的AddListener来注册回调函数

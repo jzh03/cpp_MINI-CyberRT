@@ -11,6 +11,10 @@ ReaderListener::ReaderListener(const NewMsgCallback& callback)
     : callback_(callback) {}
 
 ReaderListener::~ReaderListener(){
+    Stop();
+}
+
+void ReaderListener::Stop() {
     std::lock_guard<std::mutex> lck(mutex_);
     callback_ = nullptr;
 }
@@ -19,6 +23,7 @@ void ReaderListener::onNewCacheChangeAdded(
     eprosima::fastrtps::rtps::RTPSReader* reader,
     const eprosima::fastrtps::rtps::CacheChange_t* const change){
     
+    std::lock_guard<std::mutex> lock(mutex_);
     if(callback_ == nullptr){
         reader->getHistory()->remove_change(
             const_cast<eprosima::fastrtps::rtps::CacheChange_t*>(change));
@@ -26,7 +31,6 @@ void ReaderListener::onNewCacheChangeAdded(
         return;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_); 
     std::shared_ptr<std::string> msg_str = 
         std::make_shared<std::string>((char*)change->serializedPayload.data,change->serializedPayload.length);
     reader->getHistory()->remove_change(

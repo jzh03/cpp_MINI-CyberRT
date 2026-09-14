@@ -11,8 +11,11 @@
 #include <cmw/class_loader/class_loader_manager.h>
 
 
-const char LIBRARY_1[] = "../class_loader/test/libplugin1.so";
-const char LIBRARY_2[] = "../class_loader/test/libplugin2.so";
+#ifndef CMW_TEST_PLUGIN_DIR
+#error "Build this example through example/Makefile to locate its plugins."
+#endif
+const char LIBRARY_1[] = CMW_TEST_PLUGIN_DIR "/libplugin1.so";
+const char LIBRARY_2[] = CMW_TEST_PLUGIN_DIR "/libplugin2.so";
 
 using hnu::cmw::class_loader::ClassLoader;
 using hnu::cmw::class_loader::ClassLoaderManager;

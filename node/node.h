@@ -70,6 +70,8 @@ private:
     explicit Node(const std::string& node_name,
                     const std::string& name_space = "");
 
+    bool IsValid() const;
+
     std::string node_name_;
     std::string name_space_;
 

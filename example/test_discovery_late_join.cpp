@@ -16,21 +16,49 @@
 #include <gtest/gtest.h>
 
 #include <cmw/init.h>
+#include <cmw/config/message_type.h>
 #include <cmw/node/node.h>
 #include <cmw/scheduler/scheduler_factory.h>
 #include <cmw/transport/dispatcher/shm_dispatcher.h>
 
 extern char** environ;
 
-namespace {
-using namespace hnu::cmw;
-using Clock = std::chrono::steady_clock;
+namespace discovery_late_join_test {
+using hnu::cmw::serialize::DataStream;
 
-struct Message : serialize::Serializable {
+struct Message : hnu::cmw::serialize::Serializable {
   uint64_t sequence = 0;
   std::string payload;
   SERIALIZE(sequence, payload)
 };
+struct OtherMessage : hnu::cmw::serialize::Serializable {
+  uint64_t sequence = 0;
+  SERIALIZE(sequence)
+};
+}  // namespace discovery_late_join_test
+
+namespace hnu {
+namespace cmw {
+namespace config {
+template <>
+struct MessageTypeTrait<discovery_late_join_test::Message> {
+  static const char* Name() { return "example.discovery-late-join"; }
+  static uint32_t Version() { return 1; }
+};
+template <>
+struct MessageTypeTrait<discovery_late_join_test::OtherMessage> {
+  static const char* Name() { return "example.discovery-other"; }
+  static uint32_t Version() { return 1; }
+};
+}  // namespace config
+}  // namespace cmw
+}  // namespace hnu
+
+namespace {
+using namespace hnu::cmw;
+using discovery_late_join_test::Message;
+using discovery_late_join_test::OtherMessage;
+using Clock = std::chrono::steady_clock;
 
 struct Reception {
   uint64_t first = 0, last = 0, writer = 0;
@@ -157,6 +185,32 @@ int SubscriberWorker(const std::string& channel, int publisher_pid) {
   return write(3, &reception, sizeof(reception)) == sizeof(reception) ? 0 : 9;
 }
 
+int MismatchedSubscriberWorker(const std::string& channel, int publisher_pid) {
+  Runtime runtime;
+  auto manager = discovery::TopologyManager::Instance()->channel_manager();
+  std::vector<RoleAttributes> writers;
+  const auto deadline = Clock::now() + std::chrono::seconds(10);
+  while (Clock::now() < deadline) {
+    writers.clear();
+    manager->GetWritersOfChannel(channel, &writers);
+    if (!writers.empty()) break;
+    poll(nullptr, 0, 10);
+  }
+  if (writers.size() != 1 || writers.front().process_id != publisher_pid ||
+      writers.front().message_type !=
+          config::MessageTypeIdentifier<Message>()) {
+    return 10;
+  }
+  auto node = CreateNode(channel + "_mismatch_" + std::to_string(getpid()));
+  if (!node || node->CreateSubscriber<OtherMessage>(channel) != nullptr) {
+    return 11;
+  }
+  std::vector<RoleAttributes> readers;
+  manager->GetReadersOfChannel(channel, &readers);
+  if (!readers.empty()) return 12;
+  return Write(3, 'R') ? 0 : 13;
+}
+
 class Child {
  public:
   bool Start(const std::vector<std::string>& arguments) {
@@ -233,6 +287,34 @@ TEST(DiscoveryLateJoin, FreshProcessesDiscoverExistingWriterAndReceive) {
   ASSERT_TRUE(Write(publisher.command(), 'X'));
   ASSERT_EQ(0, publisher.Wait());
 }
+
+TEST(DiscoveryLateJoin, RejectsMismatchedRemoteTypeAndStillAcceptsMatchingType) {
+  const std::string channel = "late_join_type_" + std::to_string(getpid()) + "_" +
+      std::to_string(Clock::now().time_since_epoch().count());
+  Child publisher;
+  ASSERT_TRUE(publisher.Start({"--publisher", channel}));
+  ASSERT_TRUE(Event(publisher.event(), 'R'));
+  const pid_t publisher_pid = publisher.pid();
+
+  Child mismatch;
+  ASSERT_TRUE(mismatch.Start(
+      {"--mismatched-subscriber", channel, std::to_string(publisher_pid)}));
+  ASSERT_TRUE(Event(mismatch.event(), 'R'));
+  ASSERT_EQ(0, mismatch.Wait());
+
+  Child matching;
+  ASSERT_TRUE(matching.Start(
+      {"--subscriber", channel, std::to_string(publisher_pid)}));
+  Reception received;
+  ASSERT_TRUE(Read(matching.event(), &received, sizeof(received)));
+  ASSERT_TRUE(Event(publisher.event(), 'M'));
+  ASSERT_EQ(0, matching.Wait());
+  ASSERT_TRUE(Event(publisher.event(), 'L'));
+  ASSERT_GE(received.last - received.first, 9u);
+
+  ASSERT_TRUE(Write(publisher.command(), 'X'));
+  ASSERT_EQ(0, publisher.Wait());
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -241,6 +323,8 @@ int main(int argc, char** argv) {
   if (argc == 3 && std::string(argv[1]) == "--publisher") return PublisherWorker(argv[2]);
   if (argc == 4 && std::string(argv[1]) == "--subscriber")
     return SubscriberWorker(argv[2], std::atoi(argv[3]));
+  if (argc == 4 && std::string(argv[1]) == "--mismatched-subscriber")
+    return MismatchedSubscriberWorker(argv[2], std::atoi(argv[3]));
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

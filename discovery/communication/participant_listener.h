@@ -20,6 +20,9 @@ public:
     explicit ParticipantListener(const ChangeFunc& callback);
     virtual ~ParticipantListener();
 
+    // Prevent new callbacks and wait for an in-flight callback to finish.
+    void Stop();
+
     void onParticipantDiscovery(
             eprosima::fastrtps::rtps::RTPSParticipant* p,
             eprosima::fastrtps::rtps::ParticipantDiscoveryInfo&& info) override;

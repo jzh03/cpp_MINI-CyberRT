@@ -1,4 +1,6 @@
 #include <cmw/discovery/topology_manager.h>
+#include <exception>
+
 #include <cmw/common/global_data.h>
 #include <fastdds/rtps/participant/ParticipantDiscoveryInfo.h>
 #include <cmw/time/time.h>
@@ -21,44 +23,145 @@ TopologyManager::~TopologyManager(){
 }
 
 void TopologyManager::Shutdown(){
-
-    if(!init_.exchange(false)){
-        return;
+    NodeManagerPtr node_manager;
+    ChannelManagerPtr channel_manager;
+    transport::ParticipantPtr participant;
+    std::unique_ptr<ParticipantListener> participant_listener;
+    {
+        std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+        lifecycle_condition_.wait(lock, [this] {
+            return !initializing_ && !shutting_down_;
+        });
+        if (!init_.load() && node_manager_ == nullptr &&
+            channel_manager_ == nullptr && participant_ == nullptr &&
+            participant_listener_ == nullptr) {
+            return;
+        }
+        shutting_down_ = true;
+        init_.store(false);
+        node_manager = std::move(node_manager_);
+        channel_manager = std::move(channel_manager_);
+        participant = std::move(participant_);
+        participant_listener = std::move(participant_listener_);
     }
 
-    node_manager_->Shutdown();
-    channel_manager_->Shutdown();
-
-    delete participant_listener_;
-    participant_listener_ = nullptr;
+    // Drain participant callbacks before managers are stopped. Fast DDS 2.12
+    // removes endpoints and joins its event/receive threads synchronously when
+    // the participant is removed, so the listener remains alive until then.
+    if (participant_listener != nullptr) participant_listener->Stop();
+    if (node_manager != nullptr) node_manager->Shutdown();
+    if (channel_manager != nullptr) channel_manager->Shutdown();
+    if (participant != nullptr) participant->Shutdown();
+    participant.reset();
+    participant_listener.reset();
 
     change_signal_.DisconnectAllSlots();
+    {
+        std::lock_guard<std::mutex> lock(participant_names_mutex_);
+        participant_names_.clear();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        shutting_down_ = false;
+    }
+    lifecycle_condition_.notify_all();
 }
 
 bool TopologyManager::Init(){
-    if (init_.exchange(true)) {
-        return true;
+    {
+        std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+        lifecycle_condition_.wait(lock, [this] {
+            return !initializing_ && !shutting_down_;
+        });
+        if (init_.load()) return true;
+        initializing_ = true;
     }
 
-    //创建node_manager_ channel_manager_
-    node_manager_ = std::make_shared<NodeManager>();
-    channel_manager_ = std::make_shared<ChannelManager>();
-    //创建RtpsParticipant
-    CreateParticipant();
-    //初始化node_manager_ 和 channel_manager_
-    bool result = InitNodeManager() && InitChannelManager();
-
+    NodeManagerPtr node_manager;
+    ChannelManagerPtr channel_manager;
+    transport::ParticipantPtr participant;
+    std::unique_ptr<ParticipantListener> participant_listener;
+    bool result = false;
+    try {
+        node_manager = std::make_shared<NodeManager>();
+        channel_manager = std::make_shared<ChannelManager>();
+        result = CreateParticipant(&participant_listener, &participant);
+        if (result) {
+            auto* fastdds_participant = participant->fastrtps_participant();
+            result = node_manager->StartDiscovery(fastdds_participant) &&
+                     channel_manager->StartDiscovery(fastdds_participant);
+        }
+    } catch (const std::exception& error) {
+        AERROR << "exception while initializing topology: " << error.what();
+        result = false;
+    } catch (...) {
+        AERROR << "unknown exception while initializing topology";
+        result = false;
+    }
 
     if (!result) {
-        std::cout << "init manager failed."<<std::endl;
-        participant_ = nullptr;
-        delete participant_listener_;
-        participant_listener_ = nullptr;
-        node_manager_ = nullptr;
-        init_.store(false);
+        std::cout << "init manager failed." << std::endl;
+        {
+            std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+            initializing_ = false;
+            shutting_down_ = true;
+        }
+        try {
+            if (participant_listener != nullptr) participant_listener->Stop();
+        } catch (...) {
+            AERROR << "exception while stopping failed participant listener";
+        }
+        try {
+            if (node_manager != nullptr) node_manager->Shutdown();
+        } catch (...) {
+            AERROR << "exception while rolling back node discovery";
+        }
+        try {
+            if (channel_manager != nullptr) channel_manager->Shutdown();
+        } catch (...) {
+            AERROR << "exception while rolling back channel discovery";
+        }
+        try {
+            if (participant != nullptr) participant->Shutdown();
+        } catch (...) {
+            AERROR << "exception while rolling back RTPS participant";
+        }
+        participant.reset();
+        participant_listener.reset();
+        {
+            std::lock_guard<std::mutex> lock(participant_names_mutex_);
+            participant_names_.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+            shutting_down_ = false;
+        }
+        lifecycle_condition_.notify_all();
         return false;
     }
+
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        node_manager_ = std::move(node_manager);
+        channel_manager_ = std::move(channel_manager);
+        participant_ = std::move(participant);
+        participant_listener_ = std::move(participant_listener);
+        init_.store(true);
+        initializing_ = false;
+    }
+    lifecycle_condition_.notify_all();
     return true;
+}
+
+NodeManagerPtr TopologyManager::node_manager() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return init_.load() ? node_manager_ : nullptr;
+}
+
+ChannelManagerPtr TopologyManager::channel_manager() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return init_.load() ? channel_manager_ : nullptr;
 }
 
 
@@ -71,46 +174,59 @@ void TopologyManager::RemoveChangeListener(const ChangeConnection& conn){
 }
 
 
-bool TopologyManager::InitNodeManager() {
-  return node_manager_->StartDiscovery(participant_->fastrtps_participant());
-}
-
-bool TopologyManager::InitChannelManager(){
-  return channel_manager_->StartDiscovery(participant_->fastrtps_participant());
-}
-
-
-bool TopologyManager::CreateParticipant(){
+bool TopologyManager::CreateParticipant(
+    std::unique_ptr<ParticipantListener>* listener,
+    transport::ParticipantPtr* participant){
+    if (listener == nullptr || participant == nullptr) return false;
     std::string participant_name =
       common::GlobalData::Instance()->HostName() + '+' +
       std::to_string(common::GlobalData::Instance()->ProcessId());
     std::cout <<"participant_name: " << participant_name << std::endl;
     //创建RTPSParticipantListener
-    participant_listener_ = new ParticipantListener(std::bind(
-            &TopologyManager::OnParticipantChange, this , std::placeholders::_1));
+    auto new_listener = std::unique_ptr<ParticipantListener>(new ParticipantListener(std::bind(
+            &TopologyManager::OnParticipantChange, this , std::placeholders::_1)));
     //创建RTPSParticipant
-    participant_ = std::make_shared<transport::Participant>(
-        participant_name, 11511 , participant_listener_);
+    auto new_participant = std::make_shared<transport::Participant>(
+        participant_name, 11511 , new_listener.get());
     
+    if (new_participant->fastrtps_participant() == nullptr) return false;
+    *listener = std::move(new_listener);
+    *participant = std::move(new_participant);
     return true;
 }
 
 void TopologyManager::OnParticipantChange(const PartInfo& info){
+    bool metadata_only = false;
+    NodeManagerPtr node_manager;
+    ChannelManagerPtr channel_manager;
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        if (init_.load()) {
+            node_manager = node_manager_;
+            channel_manager = channel_manager_;
+        } else if (initializing_) {
+            // Preserve GUID-to-host metadata for a participant discovered while
+            // endpoint setup is still in progress. Business notification waits
+            // until the topology is fully initialized.
+            metadata_only = true;
+        } else {
+            return;
+        }
+    }
 
     ChangeMsg msg;
     if(!Convert(info , &msg)){
         return;
     }
-
-    if(!init_.load()){
-        return;
-    }
+    if (metadata_only) return;
 
     if(msg.operate_type == OperateType::OPT_LEAVE){
         auto& host_name = msg.role_attr.host_name;
         int process_id = msg.role_attr.process_id;
-        node_manager_->OnTopoModuleLeave(host_name, process_id);
-        channel_manager_->OnTopoModuleLeave(host_name , process_id);
+        if (node_manager != nullptr)
+            node_manager->OnTopoModuleLeave(host_name, process_id);
+        if (channel_manager != nullptr)
+            channel_manager->OnTopoModuleLeave(host_name , process_id);
     }
 
     change_signal_(msg);
@@ -130,7 +246,10 @@ bool TopologyManager::Convert(const PartInfo& info, ChangeMsg* change_msg){
         //有新的participant加入
         case ParticipantDiscoveryInfo::DISCOVERY_STATUS::DISCOVERED_PARTICIPANT:
             participant_name = info.info.m_participantName;
-            participant_names_[guid] = participant_name;
+            {
+                std::lock_guard<std::mutex> lock(participant_names_mutex_);
+                participant_names_[guid] = participant_name;
+            }
             opt_type = OperateType::OPT_JOIN;
             break;
         
@@ -138,9 +257,13 @@ bool TopologyManager::Convert(const PartInfo& info, ChangeMsg* change_msg){
 
         //有participant离开
         case ParticipantDiscoveryInfo::DISCOVERY_STATUS::DROPPED_PARTICIPANT:
-            if(participant_names_.find(guid) != participant_names_.end()){
-                participant_name = participant_names_[guid];
-                participant_names_.erase(guid);
+            {
+                std::lock_guard<std::mutex> lock(participant_names_mutex_);
+                auto iter = participant_names_.find(guid);
+                if (iter != participant_names_.end()) {
+                    participant_name = iter->second;
+                    participant_names_.erase(iter);
+                }
             }
             opt_type = OperateType::OPT_LEAVE;
             break;

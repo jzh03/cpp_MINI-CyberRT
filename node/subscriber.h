@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <cmw/node/subscriber_base.h>
+#include <cmw/common/global_data.h>
 #include <cmw/transport/transport.h>
 #include <cmw/transport/common/identity.h>
 #include <cmw/transport/receiver/receiver.h>
@@ -141,7 +142,7 @@ protected:
     uint32_t pending_queue_size_;
 
 private:
-    void JoinTheTopology();
+    bool JoinTheTopology();
     void LeaveTheTopology();
     void OnChannelChange(const ChangeMsg& change_msg);
 
@@ -192,6 +193,20 @@ void Subscriber<MessageT>::Observe(){
 
 template <typename MessageT>
 bool Subscriber<MessageT>::Init(){
+    if (role_attr_.channel_name.empty()) {
+        AERROR << "Invalid subscriber channel name";
+        return false;
+    }
+    if (role_attr_.channel_id == 0) {
+        role_attr_.channel_id =
+            common::GlobalData::RegisterChannel(role_attr_.channel_name);
+    }
+    role_attr_.message_type =
+        config::MessageTypeIdentifier<MessageT>(role_attr_.message_type);
+    if (role_attr_.message_type.empty()) {
+        AERROR << "Invalid subscriber message type identifier";
+        return false;
+    }
     std::string error;
     if (!config::NormalizeQosProfile(role_attr_.qos_profile,
                                      &role_attr_.qos_profile, &error) ||
@@ -243,7 +258,13 @@ bool Subscriber<MessageT>::Init(){
 
     channel_manager_ = discovery::TopologyManager::Instance()->channel_manager();
 
-    JoinTheTopology();
+    if (channel_manager_ == nullptr || !JoinTheTopology()) {
+        receiver_ = nullptr;
+        channel_manager_ = nullptr;
+        sched->RemoveTask(croutine_name_);
+        init_.store(false);
+        return false;
+    }
 
     return true;
 }
@@ -263,7 +284,7 @@ void Subscriber<MessageT>::Shutdown(){
 }
 
 template <typename MessageT>
-void Subscriber<MessageT>::JoinTheTopology(){
+bool Subscriber<MessageT>::JoinTheTopology(){
     change_conn_ = channel_manager_->AddChangeListener(std::bind(
         &Subscriber<MessageT>::OnChannelChange , this , std::placeholders::_1));
     
@@ -273,7 +294,17 @@ void Subscriber<MessageT>::JoinTheTopology(){
     for (auto& publisher : publishers){
         receiver_->Enable(publisher);
     }
-    channel_manager_->Join(this->role_attr_ , RoleType::ROLE_READER);
+    const bool announced =
+        channel_manager_->Join(this->role_attr_ , RoleType::ROLE_READER);
+    if (!announced && !channel_manager_->HasReader(this->role_attr_)) {
+        channel_manager_->RemoveChangeListener(change_conn_);
+        return false;
+    }
+    if (!announced) {
+        AERROR << "Reader joined locally but Discovery announcement failed: "
+               << this->role_attr_.channel_name;
+    }
+    return true;
 }
 
 template <typename MessageT>

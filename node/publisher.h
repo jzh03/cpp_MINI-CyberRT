@@ -10,6 +10,8 @@
 #include <cmw/transport/transmitter/transmitter.h>
 #include <cmw/transport/transmitter/rtps_transmitter.h>
 #include <cmw/transport/message/loaned_message.h>
+#include <cmw/config/message_type.h>
+#include <cmw/common/global_data.h>
 #include <cmw/common/log.h>
 namespace hnu    {
 namespace cmw   {
@@ -50,7 +52,7 @@ public:
 private:
     bool PublishImpl(const MessageT& msg, std::false_type);
     bool PublishImpl(const MessageT& msg, std::true_type);
-    void JoinTheTopology();
+    bool JoinTheTopology();
     void LeaveTheTopology();
     void OnChannelChange(const ChangeMsg& change_msg);
 
@@ -73,6 +75,20 @@ Publisher<MessageT>::~Publisher(){
 
 template<typename MessageT>
 bool Publisher<MessageT>::Init(){
+    if (role_attr_.channel_name.empty()) {
+        AERROR << "Invalid publisher channel name";
+        return false;
+    }
+    if (role_attr_.channel_id == 0) {
+        role_attr_.channel_id =
+            common::GlobalData::RegisterChannel(role_attr_.channel_name);
+    }
+    role_attr_.message_type =
+        config::MessageTypeIdentifier<MessageT>(role_attr_.message_type);
+    if (role_attr_.message_type.empty()) {
+        AERROR << "Invalid publisher message type identifier";
+        return false;
+    }
     std::string error;
     if (!config::NormalizeQosProfile(this->role_attr_.qos_profile,
                                      &this->role_attr_.qos_profile, &error)) {
@@ -93,7 +109,14 @@ bool Publisher<MessageT>::Init(){
     this->role_attr_.id = transmitter_->id().HashValue();
     channel_manager_ = 
         discovery::TopologyManager::Instance()->channel_manager();
-    JoinTheTopology();
+    if (channel_manager_ == nullptr || !JoinTheTopology()) {
+        std::lock_guard<std::mutex> lg(lock_);
+        init_ = false;
+        if (transmitter_ != nullptr) transmitter_->Disable();
+        transmitter_ = nullptr;
+        channel_manager_ = nullptr;
+        return false;
+    }
     return true;
 }
 
@@ -161,7 +184,7 @@ Publisher<MessageT>::Publish(std::unique_ptr<transport::LoanedMessage> message) 
 }
 
 template<typename MessageT>
-void Publisher<MessageT>::JoinTheTopology(){
+bool Publisher<MessageT>::JoinTheTopology(){
 
     //
     change_conn_ = channel_manager_->AddChangeListener(std::bind(
@@ -178,7 +201,17 @@ void Publisher<MessageT>::JoinTheTopology(){
     }
 
     //加入拓扑图
-    channel_manager_->Join(this->role_attr_, RoleType::ROLE_WRITER);
+    const bool announced =
+        channel_manager_->Join(this->role_attr_, RoleType::ROLE_WRITER);
+    if (!announced && !channel_manager_->HasWriter(this->role_attr_)) {
+        channel_manager_->RemoveChangeListener(change_conn_);
+        return false;
+    }
+    if (!announced) {
+        AERROR << "Writer joined locally but Discovery announcement failed: "
+               << this->role_attr_.channel_name;
+    }
+    return true;
 }
 
 template<typename MessageT>

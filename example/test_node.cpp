@@ -6,8 +6,38 @@
 #include <cmw/node/publisher.h>
 #include <cmw/config/unit_test.h>
 #include <cmw/scheduler/scheduler_factory.h>
+#include <cmw/discovery/topology_manager.h>
+#include <cmw/config/message_type.h>
 
 using namespace hnu::cmw;
+
+namespace {
+struct NodeMessageA : serialize::Serializable {
+  uint32_t value = 0;
+  SERIALIZE(value)
+};
+struct NodeMessageB : serialize::Serializable {
+  uint32_t value = 0;
+  SERIALIZE(value)
+};
+}  // namespace
+
+namespace hnu {
+namespace cmw {
+namespace config {
+template <>
+struct MessageTypeTrait<NodeMessageA> {
+  static const char* Name() { return "example.node-message-a"; }
+  static uint32_t Version() { return 1; }
+};
+template <>
+struct MessageTypeTrait<NodeMessageB> {
+  static const char* Name() { return "example.node-message-b"; }
+  static uint32_t Version() { return 1; }
+};
+}  // namespace config
+}  // namespace cmw
+}  // namespace hnu
 
 TEST(NodeTest, NameAndSubscriberRegistration) {
     auto node = CreateNode("node_test");
@@ -58,6 +88,37 @@ TEST(NodeTest, SharedReceiverConflictFailsCleanlyAndCanRetry) {
     EXPECT_EQ(second->GetSubscriber<config::Chatter>(cfg.channel_name), nullptr);
     cfg.qos_profile.depth = 1;
     EXPECT_NE(second->CreateSubscriber<config::Chatter>(cfg), nullptr);
+}
+
+TEST(NodeTest, ConflictingMessageTypesFailAtFactory) {
+    auto node = CreateNode("typed_node");
+    ASSERT_NE(node, nullptr);
+    const std::string channel = "node_message_type_conflict";
+    auto publisher = node->CreatePublisher<NodeMessageA>(channel);
+    ASSERT_NE(publisher, nullptr);
+    EXPECT_EQ(node->CreateSubscriber<NodeMessageB>(channel), nullptr);
+    std::vector<config::RoleAttributes> readers;
+    publisher->GetSubscribers(&readers);
+    EXPECT_TRUE(readers.empty());
+}
+
+TEST(NodeTest, CachedReceiverKeepsMessageTypeAfterLastEndpointLeaves) {
+    const std::string channel = "node_cached_receiver_type";
+    auto first = CreateNode("cached_type_first");
+    ASSERT_NE(first, nullptr);
+    auto first_subscriber = first->CreateSubscriber<NodeMessageA>(channel);
+    ASSERT_NE(first_subscriber, nullptr);
+    first_subscriber->Shutdown();
+
+    auto second = CreateNode("cached_type_second");
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(second->CreateSubscriber<NodeMessageB>(channel), nullptr);
+    EXPECT_EQ(second->CreatePublisher<NodeMessageB>(channel), nullptr);
+}
+
+TEST(NodeTest, ZTopologyShutdownMakesFactoryFailCleanly) {
+    discovery::TopologyManager::Instance()->Shutdown();
+    EXPECT_EQ(CreateNode("node_after_topology_shutdown"), nullptr);
 }
 
 int main(int argc, char** argv)

@@ -3,6 +3,7 @@
 #define CMW_BASE_WAIT_STRATEGY_H_
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <mutex>
 #include <thread>
@@ -15,6 +16,8 @@ class WaitStrategy {
  public:
   virtual void NotifyOne() {}
   virtual void BreakAllWait() {}
+  virtual uint64_t PrepareWait() { return 0; }
+  virtual bool EmptyWait(uint64_t /*observed*/) { return EmptyWait(); }
   virtual bool EmptyWait() = 0;
   virtual ~WaitStrategy() {}
 };
@@ -23,19 +26,41 @@ class WaitStrategy {
 class BlockWaitStrategy : public WaitStrategy {
  public:
   BlockWaitStrategy() {}
-  void NotifyOne() override { cv_.notify_one(); }
-
-  bool EmptyWait() override {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock);
-    return true;
+  void NotifyOne() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++generation_;
+    // A queue uses one strategy for not-empty and not-full waiters. Wake all
+    // so the waiter whose predicate changed gets a chance to recheck it.
+    cv_.notify_all();
   }
 
-  void BreakAllWait() override { cv_.notify_all(); }
+  bool EmptyWait() override {
+    return EmptyWait(PrepareWait());
+  }
+
+  uint64_t PrepareWait() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return generation_;
+  }
+
+  bool EmptyWait(uint64_t observed) override {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock,
+             [this, observed]() { return broken_ || generation_ != observed; });
+    return !broken_;
+  }
+
+  void BreakAllWait() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    broken_ = true;
+    cv_.notify_all();
+  }
 
  private:
   std::mutex mutex_;
   std::condition_variable cv_;
+  uint64_t generation_ = 0;
+  bool broken_ = false;
 };
 
 //睡眠等待策略
@@ -82,18 +107,38 @@ class TimeoutBlockWaitStrategy : public WaitStrategy {
   explicit TimeoutBlockWaitStrategy(uint64_t timeout)
       : time_out_(std::chrono::milliseconds(timeout)) {}
 
-  void NotifyOne() override { cv_.notify_one(); }
-
-  bool EmptyWait() override {
-    /* 线程阻塞 如果超时了则返回false，没超时则返回false*/
-    std::unique_lock<std::mutex> lock(mutex_);
-    if (cv_.wait_for(lock, time_out_) == std::cv_status::timeout) {
-      return false;
-    }
-    return true;
+  void NotifyOne() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++generation_;
+    cv_.notify_all();
   }
 
-  void BreakAllWait() override { cv_.notify_all(); }
+  bool EmptyWait() override {
+    return EmptyWait(PrepareWait());
+  }
+
+  uint64_t PrepareWait() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return generation_;
+  }
+
+  bool EmptyWait(uint64_t observed) override {
+    /* 线程阻塞 如果超时了则返回false，没超时则返回false*/
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!cv_.wait_for(lock, time_out_,
+                      [this, observed]() {
+                        return broken_ || generation_ != observed;
+                      })) {
+      return false;
+    }
+    return !broken_;
+  }
+
+  void BreakAllWait() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    broken_ = true;
+    cv_.notify_all();
+  }
 
   void SetTimeout(uint64_t timeout) {
     time_out_ = std::chrono::milliseconds(timeout);
@@ -102,7 +147,9 @@ class TimeoutBlockWaitStrategy : public WaitStrategy {
  private:
   std::mutex mutex_;
   std::condition_variable cv_;
-  std::chrono::milliseconds time_out_;
+  std::chrono::milliseconds time_out_{0};
+  uint64_t generation_ = 0;
+  bool broken_ = false;
 };
 
 }

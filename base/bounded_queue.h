@@ -1,37 +1,34 @@
 #ifndef CMW_BASE_BOUNDED_QUEUE_H_
 #define CMW_BASE_BOUNDED_QUEUE_H_
 
-
-#include <unistd.h>
-
-#include <algorithm>
 #include <atomic>
 #include <cstdint>
-#include <cstdlib>
+#include <exception>
 #include <memory>
+#include <mutex>
+#include <new>
 #include <utility>
+#include <vector>
 
-
-
-#include <cmw/base/macros.h>
 #include <cmw/base/wait_strategy.h>
 
-namespace hnu    {
-namespace cmw   {
+namespace hnu {
+namespace cmw {
 namespace base {
 
-
+// A bounded MPMC queue. Queue metadata and every T object are protected by
+// mutex_, so a slot cannot be recycled while another consumer is copying it.
 template <typename T>
 class BoundedQueue {
  public:
   using value_type = T;
   using size_type = uint64_t;
 
- public:
-  BoundedQueue() {}
-  BoundedQueue& operator=(const BoundedQueue& other) = delete;
-  BoundedQueue(const BoundedQueue& other) = delete;
-  ~BoundedQueue();
+  BoundedQueue() = default;
+  BoundedQueue& operator=(const BoundedQueue&) = delete;
+  BoundedQueue(const BoundedQueue&) = delete;
+  ~BoundedQueue() { BreakAllWait(); }
+
   bool Init(uint64_t size);
   bool Init(uint64_t size, WaitStrategy* strategy);
   bool Enqueue(const T& element);
@@ -42,213 +39,175 @@ class BoundedQueue {
   bool WaitDequeue(T* element);
   uint64_t Size();
   bool Empty();
-  void SetWaitStrategy(WaitStrategy* WaitStrategy);
+  void SetWaitStrategy(WaitStrategy* strategy);
   void BreakAllWait();
-  uint64_t Head() { return head_.load(); }
-  uint64_t Tail() { return tail_.load(); }
-  uint64_t Commit() { return commit_.load(); }
+  uint64_t Head() const { return head_.load(std::memory_order_acquire); }
+  uint64_t Tail() const { return tail_.load(std::memory_order_acquire); }
+  uint64_t Commit() const { return commit_.load(std::memory_order_acquire); }
 
  private:
-  uint64_t GetIndex(uint64_t num);
+  template <typename U>
+  bool EnqueueImpl(U&& element);
 
-  alignas(CACHELINE_SIZE) std::atomic<uint64_t> head_ = {0};
-  alignas(CACHELINE_SIZE) std::atomic<uint64_t> tail_ = {1};
-  alignas(CACHELINE_SIZE) std::atomic<uint64_t> commit_ = {1};
-  // alignas(CACHELINE_SIZE) std::atomic<uint64_t> size_ = {0};
-  uint64_t pool_size_ = 0;
-  T* pool_ = nullptr;
-  std::unique_ptr<WaitStrategy> wait_strategy_ = nullptr;
-  volatile bool break_all_wait_ = false;
+  mutable std::mutex mutex_;
+  std::vector<T> pool_;
+  uint64_t capacity_ = 0;
+  uint64_t size_ = 0;
+  uint64_t read_index_ = 0;
+  uint64_t write_index_ = 0;
+  std::unique_ptr<WaitStrategy> wait_strategy_;
+  std::atomic<bool> break_all_wait_{false};
+
+  // Preserve the original public counters: an empty queue starts at
+  // head=0, tail=commit=1.
+  std::atomic<uint64_t> head_{0};
+  std::atomic<uint64_t> tail_{1};
+  std::atomic<uint64_t> commit_{1};
 };
 
-template <typename T>
-BoundedQueue<T>::~BoundedQueue() {
-  if (wait_strategy_) {
-    BreakAllWait();
-  }
-  if (pool_) {
-    for (uint64_t i = 0; i < pool_size_; ++i) {
-      pool_[i].~T();
-    }
-    std::free(pool_);
-  }
-}
-
-/* 默认线程阻塞策略为睡眠策略 */
 template <typename T>
 inline bool BoundedQueue<T>::Init(uint64_t size) {
   return Init(size, new SleepWaitStrategy());
 }
 
-/* 指定队列大小和线程阻塞策略 */
 template <typename T>
 bool BoundedQueue<T>::Init(uint64_t size, WaitStrategy* strategy) {
-  // Head and tail each occupy a space
-  pool_size_ = size + 2;
-  pool_ = reinterpret_cast<T*>(std::calloc(pool_size_, sizeof(T)));
-  if (pool_ == nullptr) {
+  if (size == 0 || strategy == nullptr) {
+    delete strategy;
     return false;
   }
-  for (uint64_t i = 0; i < pool_size_; ++i) {
-    new (&(pool_[i])) T();
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (capacity_ != 0) {
+    delete strategy;
+    return false;
   }
+  if (size > pool_.max_size()) {
+    delete strategy;
+    return false;
+  }
+  try {
+    pool_.resize(static_cast<std::size_t>(size));
+  } catch (const std::exception&) {
+    delete strategy;
+    return false;
+  }
+  capacity_ = size;
   wait_strategy_.reset(strategy);
+  break_all_wait_.store(false, std::memory_order_release);
+  return true;
+}
+
+template <typename T>
+template <typename U>
+bool BoundedQueue<T>::EnqueueImpl(U&& element) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (break_all_wait_.load(std::memory_order_acquire) || capacity_ == 0 ||
+        size_ >= capacity_) {
+      return false;
+    }
+    pool_[write_index_] = std::forward<U>(element);
+    write_index_ = (write_index_ + 1) % capacity_;
+    ++size_;
+    const uint64_t next = tail_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    commit_.store(next, std::memory_order_release);
+  }
+  wait_strategy_->NotifyOne();
   return true;
 }
 
 template <typename T>
 bool BoundedQueue<T>::Enqueue(const T& element) {
-  uint64_t new_tail = 0;
-  uint64_t old_commit = 0;
-  uint64_t old_tail = tail_.load(std::memory_order_acquire);
-  do {
-    new_tail = old_tail + 1;
-    if (GetIndex(new_tail) == GetIndex(head_.load(std::memory_order_acquire))) {
-      return false;
-    }
-  } while (!tail_.compare_exchange_weak(old_tail, new_tail,
-                                        std::memory_order_acq_rel,
-                                        std::memory_order_relaxed));
-  pool_[GetIndex(old_tail)] = element;
-  do {
-    old_commit = old_tail;
-  } while (cyber_unlikely(!commit_.compare_exchange_weak(
-      old_commit, new_tail, std::memory_order_acq_rel,
-      std::memory_order_relaxed)));
-  wait_strategy_->NotifyOne();
-  return true;
+  return EnqueueImpl(element);
 }
 
 template <typename T>
 bool BoundedQueue<T>::Enqueue(T&& element) {
-  uint64_t new_tail = 0;
-  uint64_t old_commit = 0;
-  uint64_t old_tail = tail_.load(std::memory_order_acquire);
-  do {
-    new_tail = old_tail + 1;
-    if (GetIndex(new_tail) == GetIndex(head_.load(std::memory_order_acquire))) {
+  return EnqueueImpl(std::move(element));
+}
+
+template <typename T>
+bool BoundedQueue<T>::Dequeue(T* element) {
+  if (element == nullptr) {
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (size_ == 0) {
       return false;
     }
-  } while (!tail_.compare_exchange_weak(old_tail, new_tail,
-                                        std::memory_order_acq_rel,
-                                        std::memory_order_relaxed));
-  pool_[GetIndex(old_tail)] = std::move(element);
-  do {
-    old_commit = old_tail;
-  } while (cyber_unlikely(!commit_.compare_exchange_weak(
-      old_commit, new_tail, std::memory_order_acq_rel,
-      std::memory_order_relaxed)));
+    *element = std::move(pool_[read_index_]);
+    read_index_ = (read_index_ + 1) % capacity_;
+    --size_;
+    head_.fetch_add(1, std::memory_order_release);
+  }
   wait_strategy_->NotifyOne();
   return true;
 }
 
-
-template <typename T>
-bool BoundedQueue<T>::Dequeue(T* element) {
-  uint64_t new_head = 0;
-  uint64_t old_head = head_.load(std::memory_order_acquire);
-  do {
-    new_head = old_head + 1;
-    if (new_head == commit_.load(std::memory_order_acquire)) {
-      return false;
-    }
-    *element = pool_[GetIndex(new_head)];
-  } while (!head_.compare_exchange_weak(old_head, new_head,
-                                        std::memory_order_acq_rel,
-                                        std::memory_order_relaxed));
-  return true;
-}
-
-/*基于等待策略的入队操作*/
 template <typename T>
 bool BoundedQueue<T>::WaitEnqueue(const T& element) {
-  while (!break_all_wait_) {
-    if (Enqueue(element)) {
-      return true;
-    }
-    if (wait_strategy_->EmptyWait()) {
-      continue;
-    }
-    // wait timeout
-    break;
+  if (!wait_strategy_) return false;
+  while (!break_all_wait_.load(std::memory_order_acquire)) {
+    const uint64_t observed = wait_strategy_->PrepareWait();
+    if (Enqueue(element)) return true;
+    if (!wait_strategy_->EmptyWait(observed)) return false;
   }
-
   return false;
 }
 
-/*基于等待策略的出队操作*/
 template <typename T>
 bool BoundedQueue<T>::WaitEnqueue(T&& element) {
-  while (!break_all_wait_) {
-    if (Enqueue(std::move(element))) {
-      return true;
-    }
-    if (wait_strategy_->EmptyWait()) {
-      continue;
-    }
-    // wait timeout
-    break;
+  if (!wait_strategy_) return false;
+  while (!break_all_wait_.load(std::memory_order_acquire)) {
+    const uint64_t observed = wait_strategy_->PrepareWait();
+    if (Enqueue(std::move(element))) return true;
+    if (!wait_strategy_->EmptyWait(observed)) return false;
   }
-
   return false;
 }
 
 template <typename T>
 bool BoundedQueue<T>::WaitDequeue(T* element) {
-  while (!break_all_wait_) {
-    /*如果对了里有数据，则直接return true，否则返回false*/
-    if (Dequeue(element)) {
-      return true;
-    }
-    /*执行等待策略*/
-    if (wait_strategy_->EmptyWait()) {
-      continue;
-    }
-    // wait timeout
-    break;
+  if (!wait_strategy_) return false;
+  while (!break_all_wait_.load(std::memory_order_acquire)) {
+    const uint64_t observed = wait_strategy_->PrepareWait();
+    if (Dequeue(element)) return true;
+    if (!wait_strategy_->EmptyWait(observed)) return false;
   }
-
   return false;
 }
 
 template <typename T>
-inline uint64_t BoundedQueue<T>::Size() {
-  return tail_ - head_ - 1;
+uint64_t BoundedQueue<T>::Size() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return size_;
 }
 
 template <typename T>
-inline bool BoundedQueue<T>::Empty() {
-  return Size() == 0;
-}
-
-/* 由于是无符号整数，所以返回的是索引，类似于取余*/
-template <typename T>
-inline uint64_t BoundedQueue<T>::GetIndex(uint64_t num) {
-  return num - (num / pool_size_) * pool_size_;  // faster than %
+bool BoundedQueue<T>::Empty() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return size_ == 0;
 }
 
 template <typename T>
-inline void BoundedQueue<T>::SetWaitStrategy(WaitStrategy* strategy) {
+void BoundedQueue<T>::SetWaitStrategy(WaitStrategy* strategy) {
+  if (strategy == nullptr) return;
+  // Configuration only: callers must stop queue operations before replacing
+  // the strategy, just as they must before destroying the queue itself.
+  std::lock_guard<std::mutex> lock(mutex_);
   wait_strategy_.reset(strategy);
 }
 
 template <typename T>
-inline void BoundedQueue<T>::BreakAllWait() {
-  break_all_wait_ = true;
-  wait_strategy_->BreakAllWait();
+void BoundedQueue<T>::BreakAllWait() {
+  if (break_all_wait_.exchange(true, std::memory_order_acq_rel)) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (wait_strategy_) wait_strategy_->BreakAllWait();
 }
 
-
-}
-}
-}
-
-
-
-
-
-
-
-
+}  // namespace base
+}  // namespace cmw
+}  // namespace hnu
 
 #endif

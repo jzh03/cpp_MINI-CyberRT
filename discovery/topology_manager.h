@@ -3,6 +3,7 @@
 
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <memory>
@@ -40,22 +41,22 @@ public:
 
     virtual ~TopologyManager();
 
+    // Init may be retried after a failed initialization or an explicit Shutdown.
+    bool Init();
     void Shutdown();
+    bool IsInitialized() const { return init_.load(); }
 
     ChangeConnection AddChangeListener(const ChangeFunc& func);
     void RemoveChangeListener(const ChangeConnection& conn);    
 
-    NodeManagerPtr& node_manager() { return node_manager_;}
-    ChannelManagerPtr& channel_manager() { return channel_manager_;}
+    NodeManagerPtr node_manager() const;
+    ChannelManagerPtr channel_manager() const;
 
 private:
 
-    bool Init();
-
-    bool InitNodeManager();
-    bool InitChannelManager();
-
-    bool CreateParticipant();
+    bool CreateParticipant(
+        std::unique_ptr<ParticipantListener>* listener,
+        transport::ParticipantPtr* participant);
 
     void OnParticipantChange(const PartInfo& info);
 
@@ -65,16 +66,21 @@ private:
                             std::string* host_name, int* process_id);
 
     std::atomic<bool> init_;
+    bool initializing_ = false;
+    bool shutting_down_ = false;
+    mutable std::mutex lifecycle_mutex_;
+    std::condition_variable lifecycle_condition_;
 
     NodeManagerPtr node_manager_;
     ChannelManagerPtr channel_manager_;
 
     transport::ParticipantPtr participant_;
 
-    ParticipantListener* participant_listener_;
+    std::unique_ptr<ParticipantListener> participant_listener_;
 
     ChangeSignal change_signal_;
 
+    mutable std::mutex participant_names_mutex_;
     PartNameContainer participant_names_;
     
     DECLARE_SINGLETON(TopologyManager)

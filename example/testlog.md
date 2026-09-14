@@ -43,6 +43,9 @@
 | 通信 Demo | 2026-09-12 | [A～E、两轮完整运行、4 MiB 与 Ctrl+C](#2026-09-12-面试通信-demo-本地验收) |
 | 测试构建与执行器 | 2026-09-06 | [fast 13 过、integration 6 过 2 崩溃；runner 失败检测](#2026-09-06-测试集整理与首轮失败) |
 | 测试构建与执行器 | 2026-09-06 | [旧对象、RTPS 填充、runner 修复与 ASan/UBSan](#2026-09-06-独立构建与-loan-崩溃修复复验) |
+| 测试构建与执行器 | 2026-09-14 | [项目审阅：增量构建检查、沙箱网络失败与本机 30 程序复验通过](#2026-09-14-项目审阅回归复验) |
+| 测试构建与执行器 | 2026-09-14 | [统一 example/build 目录、清理旧产物；class-loader 构建和新路径加载验证](#2026-09-14-编译产物目录统一) |
+| 运行时正确性 | 2026-09-14 | [P1 修复及 SHM v3：38 程序通过、7 程序 ASan、3 程序定向 TSan；保留失败与清理记录](#2026-09-14-p1-评审问题修复与回归) |
 | 运行环境 | 未记录 | [早期 TSan 启动限制](#更早的环境记录日期未记录) |
 
 ## 2026-08-23 序列化边界与发布订阅回归
@@ -2343,3 +2346,322 @@ env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' ASAN_OPTION
 输出重定向均位于 [log/qos-volatile-20260914](../log/qos-volatile-20260914/)，运行库日志位于根目录 `log/`。
 本轮范围为同机 INTRA、跨进程 SHM、同机强制 RTPS 和受控 host 元数据选路；
 未做真实跨主机实验、业务 INTRA/SHM 历史补发、SHM 可靠重传或 Demo A～E 场景验收。
+
+## 2026-09-14 项目审阅回归复验
+
+工作目录 `/home/jim/cpp/CyberRT`；分支 `dev`，HEAD
+`239aea871fd1daa43a2fed4efd233a7d4d1d2b5b`。开始时工作区干净，本轮未修改运行库或测试程序。
+环境：Linux `6.8.0-138-generic` x86_64，Ubuntu g++ `11.4.0`，C++14、`-faligned-new`，
+Fast DDS 使用 Makefile 默认 `/home/jim/cpp/fastdds_2.12/install`。
+沿用已有 `BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914`，没有执行 clean 或全新目录构建；
+命令未指定 SANITIZE、OPTFLAGS 或 sanitizer 运行选项。日期按 Asia/Shanghai 记录。
+
+实际构建检查命令：
+
+```bash
+mkdir -p log/project-review-20260914
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914 -j2 tests > log/project-review-20260914/build.log 2>&1
+review_status=$?
+tail -8 log/project-review-20260914/build.log
+exit "$review_status"
+```
+
+退出 0；现有对象和测试目标已是最新，没有新的编译/链接输出。这仅表示增量构建检查成功，
+不能作为陌生机器从零构建或程序测试通过的证据。
+
+首轮在受限沙箱中执行，保留完整命令：
+
+```bash
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' unshare --user --map-root-user --ipc make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914 -j2 check > log/project-review-20260914/check-sandbox.log 2>&1
+review_status=$?
+tail -12 log/project-review-20260914/check-sandbox.log
+exit "$review_status"
+```
+
+退出 2。fast passed=12、failed=4、timed_out=0；integration passed=4、failed=10、timed_out=0。
+日志出现 `getifaddrs: Operation not permitted` 和 `open: Operation not permitted`，
+DDS 网络资源创建受到环境限制。fast 中 `test_node` 退出 1，`test_publisher_subscriber`、
+`test_shm_loaned_message`、`test_hybrid_intra` 为 signal 11（status 139）；
+本轮没有用调试器逐项定位这三项崩溃，不能将其根因统一断言为权限错误。
+integration 中仅 `test_condition_notifier`、`test_shm_segment_exec`、
+`test_posix_segment_multiprocess`、`test_shm_loaned_message_multiprocess` 通过，其余十个程序非零退出。
+首轮不记为完整通信验证通过。
+
+获得本机网络测试执行权限后，使用同一 HEAD、二进制、过滤条件及独立 user/IPC 环境复验：
+
+```bash
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' unshare --user --map-root-user --ipc make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-qos-20260914 -j2 check > log/project-review-20260914/check-local.log 2>&1
+review_status=$?
+tail -15 log/project-review-20260914/check-local.log
+exit "$review_status"
+```
+
+退出 0，fast passed=16、integration passed=14，均 failed=0、timed_out=0，最终 `check: PASSED`。
+使用 Makefile 全部正式目标，GoogleTest 无过滤；每程序超时沿用 fast 30 秒、integration 90 秒。
+没有在两轮之间修改源码或测试夹具；后续成功不覆盖首轮失败。
+
+结果只覆盖现有断言所编排的同机 INTRA、跨进程 SHM、同机强制 RTPS、受控 host 元数据路由、
+QoS 和生命周期场景。本轮没有执行 sanitizer、benchmark、Demo A～E、真实跨主机、ARM 板端或驱动测试。
+测试的独占资源由现有测试清理流程处理，SysV 通知区处于独立 IPC namespace；没有全局删除宿主共享区。
+三份输出在 [log/project-review-20260914](../log/project-review-20260914/)，程序 Logger 继续写根目录 `log/`。
+
+
+## 2026-09-14 P1 评审问题修复与回归
+
+工作目录均为 `/home/jim/cpp/CyberRT`；分支 `dev`，HEAD
+`239aea871fd1daa43a2fed4efd233a7d4d1d2b5b` 加本轮未提交修复。日期按 Asia/Shanghai。
+Linux `6.8.0-138-generic` x86_64、g++ `11.4.0`、C++14、Fast DDS
+`/home/jim/cpp/fastdds_2.12/install`；除明确指定外无 SANITIZE/OPTFLAGS 覆盖。
+普通构建目录 `/tmp/cmw-p1-normal-20260914`，TSan `/tmp/cmw-p1-tsan-20260914`，
+ASan `/tmp/cmw-p1-asan-20260914`，三者分别创建，不混用插桩对象。
+覆盖报告九项 P1，另明确满队列 future 拒绝行为；不包含报告的 P2 Notifier 忙循环修复。
+全部重定向输出在 [log/p1-fixes-20260914](../log/p1-fixes-20260914/)，运行库日志仍在根 `log/`。
+下列命令保留实际参数、目标、环境与输出路径；各 root 调用另保存 `$?`，显示日志尾部后以该状态返回，
+状态以下述结果为准，不能仅以输出中的 PASS 行替代退出码。
+
+**独立队列编译与初次 TSan 环境失败**
+
+```bash
+mkdir -p /tmp/cyberrt-p1-queue /home/jim/cpp/CyberRT/log/p1-fixes-20260914
+g++ -std=c++14 -faligned-new -pthread -I/home/jim/cpp/CyberRT/example/build/include /home/jim/cpp/CyberRT/example/test_queue_regression.cpp -o /tmp/cyberrt-p1-queue/test_queue_regression > /home/jim/cpp/CyberRT/log/p1-fixes-20260914/queue-compile.log 2>&1
+timeout 20s /tmp/cyberrt-p1-queue/test_queue_regression > /home/jim/cpp/CyberRT/log/p1-fixes-20260914/queue-run.log 2>&1
+g++ -std=c++14 -faligned-new -pthread -fsanitize=thread -fno-omit-frame-pointer -fno-pie -no-pie -I/home/jim/cpp/CyberRT/example/build/include /home/jim/cpp/CyberRT/example/test_queue_regression.cpp -o /tmp/cyberrt-p1-queue/test_queue_regression_tsan > /home/jim/cpp/CyberRT/log/p1-fixes-20260914/queue-tsan-compile.log 2>&1
+timeout 30s /tmp/cyberrt-p1-queue/test_queue_regression_tsan > /home/jim/cpp/CyberRT/log/p1-fixes-20260914/queue-tsan-run.log 2>&1
+```
+
+普通编译、普通运行、TSan 编译均退出 0；TSan 直接运行退出 66，
+`FATAL: ThreadSanitizer: unexpected memory mapping`，属于 sanitizer 启动失败，不是已检测出的竞态。
+随后只为该进程关闭 ASLR 复验：
+
+```bash
+timeout 30s setarch x86_64 -R /tmp/cyberrt-p1-queue/test_queue_regression_tsan > log/p1-fixes-20260914/queue-tsan-noaslr.log 2>&1
+```
+
+退出 0，队列回归通过，无 TSan 报告。中间两轮普通复验也保留实际命令：
+
+```bash
+g++ -std=c++14 -faligned-new -pthread -Wall -Wextra -Werror -I/home/jim/cpp/CyberRT/example/build/include /home/jim/cpp/CyberRT/example/test_queue_regression.cpp -o /tmp/cyberrt-p1-queue/test_queue_regression > /home/jim/cpp/CyberRT/log/p1-fixes-20260914/queue-recheck-compile.log 2>&1
+timeout 20s /tmp/cyberrt-p1-queue/test_queue_regression > /home/jim/cpp/CyberRT/log/p1-fixes-20260914/queue-recheck-run.log 2>&1
+g++ -std=c++14 -faligned-new -pthread -Wall -Wextra -Werror -I/home/jim/cpp/CyberRT/example/build/include /home/jim/cpp/CyberRT/example/test_queue_regression.cpp -o /tmp/cyberrt-p1-queue/test_queue_regression > /home/jim/cpp/CyberRT/log/p1-fixes-20260914/queue-final-compile.log 2>&1
+timeout 20s /tmp/cyberrt-p1-queue/test_queue_regression > /home/jim/cpp/CyberRT/log/p1-fixes-20260914/queue-final-run.log 2>&1
+```
+
+四条均退出 0，两个 run 输出 `queue regression passed`。最终等待协议和用例补充后的普通复验：
+
+```bash
+g++ -std=c++14 -faligned-new -pthread -Wall -Wextra -Werror -I/home/jim/cpp/CyberRT/example/build/include /home/jim/cpp/CyberRT/example/test_queue_regression.cpp -o /tmp/cyberrt-p1-queue/test_queue_regression > /home/jim/cpp/CyberRT/log/p1-fixes-20260914/queue-final2-compile.log 2>&1
+timeout 20s /tmp/cyberrt-p1-queue/test_queue_regression > /home/jim/cpp/CyberRT/log/p1-fixes-20260914/queue-final2-run.log 2>&1
+```
+
+两条均退出 0，输出 `queue regression passed`。
+
+**子代理中间构建，仅构建未运行**
+
+```bash
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-p1-fixes-20260914 -j2 /home/jim/cpp/CyberRT/example/build-p1-fixes-20260914/obj/transport/rtps/participant.o /home/jim/cpp/CyberRT/example/build-p1-fixes-20260914/obj/discovery/communication/participant_listener.o /home/jim/cpp/CyberRT/example/build-p1-fixes-20260914/obj/discovery/communication/reader_listener.o /home/jim/cpp/CyberRT/example/build-p1-fixes-20260914/obj/discovery/specific_manager/manager.o /home/jim/cpp/CyberRT/example/build-p1-fixes-20260914/obj/discovery/topology_manager.o /home/jim/cpp/CyberRT/example/build-p1-fixes-20260914/obj/example/test_discovery_lifecycle.o 2>&1 | tee log/p1-fixes-20260914/transport-review-build.log
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build-p1-fixes-20260914 /home/jim/cpp/CyberRT/example/build-p1-fixes-20260914/bin/test_message_type /home/jim/cpp/CyberRT/example/build-p1-fixes-20260914/bin/test_channel_lifecycle /home/jim/cpp/CyberRT/example/build-p1-fixes-20260914/bin/test_node > log/p1-fixes-20260914/targeted-build.log 2>&1
+```
+
+第一条完成六个对象编译，未链接/运行；原始 make 的独立退出码未保存，不能以 tee 成功替代。
+第二条退出 0，三个目标完成链接，未运行，且早于最后的直接模板入口兼容补丁。
+
+早期消息类型单元用例另行编译和运行（尚未增加跨 exec/main 分支）：
+
+```bash
+g++ -std=c++14 -Iexample/build/include example/test_message_type.cpp -lgtest -lgtest_main -pthread -o /tmp/cyberrt-test-message-type > log/p1-fixes-20260914/message-type-build.log 2>&1
+/tmp/cyberrt-test-message-type > log/p1-fixes-20260914/message-type-run.log 2>&1
+```
+
+两条均退出 0，4/4 用例通过；后续新增类型、缓存和跨进程断言以最终整体验收为准。
+
+**主审定向普通回归**
+
+```bash
+mkdir -p log/p1-fixes-20260914
+make -C example BUILD_DIR=/tmp/cmw-p1-normal-20260914 -j2 test_scheduler_attributes test_rtps_dispatcher_decode > log/p1-fixes-20260914/build-root-01.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' bash example/run_tests.sh --bin-dir /tmp/cmw-p1-normal-20260914/bin --timeout 30 test_scheduler_attributes test_rtps_dispatcher_decode > log/p1-fixes-20260914/targeted-root-01.log 2>&1
+make -C example BUILD_DIR=/tmp/cmw-p1-normal-20260914 -j2 test_queue_regression test_croutine_concurrency > log/p1-fixes-20260914/build-concurrency-01.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 bash example/run_tests.sh --bin-dir /tmp/cmw-p1-normal-20260914/bin --timeout 30 test_queue_regression test_croutine_concurrency > log/p1-fixes-20260914/targeted-concurrency-01.log 2>&1
+```
+
+四条构建/运行命令均退出 0。第一组 passed=2：调度属性 4 项、RTPS 解码 1 项（遍历两个适配器）；
+第二组 passed=2：队列和协程自检。两组 failed=0、timed_out=0。
+FIFO/RR 本机权限未授予，测试打印 LIMIT；验证了真实失败返回及包装系统调用的优先级参数，
+不记录为成功启用实时调度。affinity 与目标线程 nice 则读取实际线程状态验证。
+
+**正式最小目标 TSan**
+
+```bash
+make -C example BUILD_DIR=/tmp/cmw-p1-tsan-20260914 SANITIZE=thread -j2 test_queue_regression test_croutine_concurrency > log/p1-fixes-20260914/build-tsan-01.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 TSAN_OPTIONS=halt_on_error=1 setarch x86_64 -R bash example/run_tests.sh --bin-dir /tmp/cmw-p1-tsan-20260914/bin --timeout 30 test_queue_regression test_croutine_concurrency > log/p1-fixes-20260914/targeted-tsan-01.log 2>&1
+make -C example BUILD_DIR=/tmp/cmw-p1-tsan-20260914 SANITIZE=thread -j2 test_queue_regression test_croutine_concurrency > log/p1-fixes-20260914/build-tsan-02.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 TSAN_OPTIONS=halt_on_error=1 setarch x86_64 -R bash example/run_tests.sh --bin-dir /tmp/cmw-p1-tsan-20260914/bin --timeout 30 test_queue_regression test_croutine_concurrency > log/p1-fixes-20260914/targeted-tsan-02.log 2>&1
+```
+
+两次构建均退出 0；两次 runner 均退出 0、passed=2、failed=0、timed_out=0，无 TSan 报告。
+第二次包含补充的 Stop/Resume 10 万次并发字段访问；不链接 DDS，不把此结果扩展为完整 scheduler、
+手写上下文切换汇编、所有 runtime 线程或外部库已经通过 TSan。
+
+**全量首轮、磁盘不足及诊断失败**
+
+```bash
+make -C example BUILD_DIR=/tmp/cmw-p1-normal-20260914 -j3 tests demos > log/p1-fixes-20260914/build-full-01.log 2>&1
+```
+
+退出 2，磁盘可用仅约 14 MiB，链接 test_subscriber/test_log/test_topology_manager 报“设备上没有空间”。
+这次没有执行完整测试。清理确认仅含生成物的本轮重复目录，并移除本轮普通对象/二进制的调试节：
+
+```bash
+rm -r /home/jim/cpp/CyberRT/example/build-p1-fixes-20260914
+python3 - <<'PY_CLEAN'
+import pathlib, subprocess
+root = pathlib.Path('/tmp/cmw-p1-normal-20260914')
+files = list((root / 'obj').rglob('*.o')) + list((root / 'bin').glob('*'))
+for path in files:
+    if path.is_file():
+        subprocess.run(['strip', '--strip-debug', str(path)], check=True)
+print('Removed debug sections from', len(files), 'task build artifacts; executable code retained.')
+PY_CLEAN
+make -C example BUILD_DIR=/tmp/cmw-p1-normal-20260914 -j2 tests demos > log/p1-fixes-20260914/build-full-02.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' unshare --user --map-root-user --ipc make -C example BUILD_DIR=/tmp/cmw-p1-normal-20260914 -j2 check > log/p1-fixes-20260914/check-full-01.log 2>&1
+```
+
+清理/strip 退出 0，处理 155 个生成物，释放约 1 GiB；第二次构建退出 0。
+首轮 check 退出 2：fast passed=20、failed=3、timed_out=0；integration passed=14、failed=1、timed_out=0。
+失败保留如下：
+
+- test_qos：直接 ReceiverManager 入口未自动填消息类型，创建返回空；补齐模板入口归一化。
+- test_publisher_subscriber：直接 Publisher/Subscriber 入口未补消息类型及 channel_id；
+  新增 JOIN 失败传播暴露旧代码忽略失败的行为，修复运行库兼容入口，未弱化原断言。
+- test_shm_transmitter_lifecycle_regression：HeapLoanSendsAcrossShmLifecycleRace 最后单个恢复样本未在 5 秒内收到。
+- test_discovery_lifecycle：注入 Reader 抛异常时未被旧 Manager 对象捕获。
+  strip 更新了对象时间戳，可能掩盖仍在合入的依赖变更，因此此轮仅作诊断；后续使用 `-B` 强制全部重建，
+  不以这轮部分成功证明最终版本正确。
+
+用户授权继续清理磁盘后，确认旧 `example/build-qos-20260914` 仅含 37 个二进制、106 个 .o、105 个 .d
+及 include 兼容链接，无运行中进程使用该目录，再删除可重建产物：
+
+```bash
+rm -r /home/jim/cpp/CyberRT/example/build-qos-20260914
+```
+
+退出 0，额外释放约 1.1 GiB，当时可用约 2.1 GiB；历史源码、构建/运行日志和 testlog 保留。
+历史记录中这一 BUILD_DIR 是当时实际目录，本轮清理不改写旧命令路径。
+
+**ASan 定向生命周期与解码回归**
+
+```bash
+make -C example BUILD_DIR=/tmp/cmw-p1-asan-20260914 SANITIZE=address OPTFLAGS=-g1 -j2 test_discovery_lifecycle test_rtps_dispatcher_decode test_channel_lifecycle test_node > log/p1-fixes-20260914/build-asan-01.log 2>&1
+make -C example BUILD_DIR=/tmp/cmw-p1-asan-20260914 SANITIZE=address OPTFLAGS=-g1 -j2 test_discovery_lifecycle test_rtps_dispatcher_decode test_channel_lifecycle test_node > log/p1-fixes-20260914/build-asan-02.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir /tmp/cmw-p1-asan-20260914/bin --timeout 90 test_discovery_lifecycle test_rtps_dispatcher_decode test_channel_lifecycle test_node > log/p1-fixes-20260914/targeted-asan-01.log 2>&1
+```
+
+两次构建退出 0；runner 退出 0，passed=4、failed=0、timed_out=0：Discovery 生命周期 2 项、
+RTPS 解码 1 项、频道生命周期 3 项、Node 6 项，无 AddressSanitizer 错误。
+使用 `-g1` 减少调试信息磁盘占用，non-PIE/frame-pointer 由 Makefile 配置。
+`detect_leaks=0`，不含泄漏验证；Fast DDS 外部库未重新插桩。
+
+**强制重建与兼容复验**
+
+```bash
+make -B -C example BUILD_DIR=/tmp/cmw-p1-normal-20260914 -j2 tests demos > log/p1-fixes-20260914/build-full-03.log 2>&1
+make -C example BUILD_DIR=/tmp/cmw-p1-normal-20260914 -j2 test_qos test_publisher_subscriber test_discovery_lifecycle > log/p1-fixes-20260914/build-compat-01.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir /tmp/cmw-p1-normal-20260914/bin --timeout 30 test_qos test_publisher_subscriber test_discovery_lifecycle > log/p1-fixes-20260914/targeted-compat-01.log 2>&1
+```
+
+`-B` 日志包含全量编译/链接、没有编译错误，但用户续接后原工具 session 已失效，未取得该进程独立退出码，
+不单凭日志将其记为完整通过；后续增量与最终完整 check 会再次核对构建。
+compat 构建退出 0；runner 退出 0，passed=3、failed=0、timed_out=0。
+原直接模板入口保持成功合同，Discovery return-false/throw 两条回滚路径均通过。
+
+**额外发现的 SHM 首次挂接与删除竞态**
+
+首轮 SHM heap 恢复失败的进一步源码/日志分析：接收端可能已 mmap 旧段但尚未增加引用，
+最后一个发送端先减到零并 unlink；接收端随后给已移除的映射加引用，Dispatcher 将其缓存。
+同名新段重新从 block 0/generation 1 开始，恢复通知可能读到旧数据。
+因此保留原用例及断言，补充 State 的存活引用/closing CAS 握手；只允许最后一次释放的唯一获胜者删除段。
+新的真实双 mmap 用例固定“已映射、尚未挂接”的窗口，并验证已 closing 的映射不可重新挂接；
+32 个持有者并发释放只产生一个删除者。Payload layout 从 v2 升 v3，旧协议显式拒绝。
+这不提供进程崩溃后的引用回收，也没有扩大成任意 resize/外部 unlink 的跨代际一致性保证。
+
+
+**最终完整 check 与 SHM TSan**
+
+```bash
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' unshare --user --map-root-user --ipc make -C example BUILD_DIR=/tmp/cmw-p1-normal-20260914 -j2 check > log/p1-fixes-20260914/check-full-02.log 2>&1
+g++ -std=c++14 -faligned-new -g1 -fsanitize=thread -fno-omit-frame-pointer -fno-pie -no-pie -DCMW_PROJECT_ROOT='"/home/jim/cpp/CyberRT"' -I/tmp/cmw-p1-tsan-20260914/include example/test_shm_segment_robustness.cpp transport/shm/segment.cpp transport/shm/state.cpp transport/shm/block.cpp transport/shm/shm_conf.cpp log/logger.cpp -pthread -lrt -latomic -lgtest -o /tmp/cmw-p1-tsan-20260914/bin/test_shm_segment_robustness_manual > log/p1-fixes-20260914/build-shm-tsan-01.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT TSAN_OPTIONS=halt_on_error=1 GTEST_FILTER='ShmSegmentRobustnessTest.MappedOpenerCannotAttachAfterClosingStarts:ShmSegmentRobustnessTest.LastReferenceHasOneRemovalWinner' setarch x86_64 -R bash example/run_tests.sh --bin-dir /tmp/cmw-p1-tsan-20260914/bin --timeout 30 test_shm_segment_robustness_manual > log/p1-fixes-20260914/targeted-shm-tsan-01.log 2>&1
+```
+
+完整 check 退出 0：fast passed=23、integration passed=15，共 38 个正式程序，failed=0、timed_out=0，
+最终 `check: PASSED`；已含最新直接入口归一化、Discovery 异常回滚及 SHM v3 CAS 协议。
+原 HeapLoanSendsAcrossShmLifecycleRace 用例未添加 warmup 或放宽断言，本轮通过。
+真实跨 exec 用例先发现远端 Writer，再拒绝本地异型 Subscriber，随后同型 Subscriber 正常接收；
+未端到端验证异型远端 JOIN 后到达的反向时序。SHM 最小 TSan 编译退出 0，过滤后的 2 项退出 0，
+runner passed=1，无 TSan 报告；这次并未用 TSan 跑完整 SHM/Dispatcher 网络线程。
+
+**扩展 ASan 构建与续接后的临时目录丢失**
+
+```bash
+make -C example BUILD_DIR=/tmp/cmw-p1-asan-20260914 SANITIZE=address OPTFLAGS=-g1 -j2 test_discovery_lifecycle test_rtps_dispatcher_decode test_channel_lifecycle test_node test_shm_segment_robustness test_shm_segment_exec test_shm_transmitter_lifecycle_regression > log/p1-fixes-20260914/build-asan-03.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir /tmp/cmw-p1-asan-20260914/bin --timeout 90 test_discovery_lifecycle test_rtps_dispatcher_decode test_channel_lifecycle test_node test_shm_segment_robustness test_shm_segment_exec test_shm_transmitter_lifecycle_regression > log/p1-fixes-20260914/targeted-asan-02.log 2>&1
+```
+
+`build-asan-03.log` 对应构建退出 0，新增三项 SHM 二进制完成链接。
+用户再次续接后，21:14 检查发现三个 `/tmp/cmw-p1-*` 构建目录均已不存在，仓库源码与日志仍在；
+没有推断或补写目录删除原因。这次 ASan runner 退出 1：passed=0、failed=7、timed_out=0，
+全部原因为 missing binary，没有启动程序，不能记为 sanitizer 发现七个代码错误。
+随后改用仓库内忽略目录重新构建，避免依赖续接期间的临时目录保留。
+
+
+**仓库内重建后的最终 ASan 与手工示例构建**
+
+```bash
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build/p1-asan-20260914 SANITIZE=address OPTFLAGS=-g1 -j3 test_discovery_lifecycle test_rtps_dispatcher_decode test_channel_lifecycle test_node test_shm_segment_robustness test_shm_segment_exec test_shm_transmitter_lifecycle_regression > log/p1-fixes-20260914/build-asan-04.log 2>&1
+env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 GTEST_FILTER='*' ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 unshare --user --map-root-user --ipc bash example/run_tests.sh --bin-dir /home/jim/cpp/CyberRT/example/build/p1-asan-20260914/bin --timeout 90 test_discovery_lifecycle test_rtps_dispatcher_decode test_channel_lifecycle test_node test_shm_segment_robustness test_shm_segment_exec test_shm_transmitter_lifecycle_regression > log/p1-fixes-20260914/targeted-asan-03.log 2>&1
+make -C example BUILD_DIR=/tmp/cmw-p1-normal-20260914 -j2 demos > log/p1-fixes-20260914/build-demos-final.log 2>&1
+```
+
+ASan 全新目录构建退出 0；runner 退出 0，passed=7、failed=0、timed_out=0，
+未出现 AddressSanitizer 错误；包含 v3 引用关闭、新旧布局拒绝和原 heap 恢复用例。
+仍为 `detect_leaks=0`，外部 Fast DDS 未插桩；手写协程汇编的切栈不等同于受完整 sanitizer 跟踪。
+`demos` 构建也退出 0，七个旧手工示例完成构建，未实际运行；它们不等于 A～E 通信 Demo。
+
+最终证据为：完整正式回归 38 程序通过；ASan 定向 7 程序通过；TSan 队列、协程和
+过滤后的 SHM 引用协议三个程序通过。程序均只验证各自实际断言；未做真实双机、ARM、
+benchmark、Demo A～E 或进程崩溃恢复验证。清理限于已确认的可重建目录，源码与历史日志保留。
+
+
+## 2026-09-14 编译产物目录统一
+
+工作目录 `/home/jim/cpp/CyberRT`；分支 `dev`，HEAD
+`239aea871fd1daa43a2fed4efd233a7d4d1d2b5b` 加未提交修改。Linux x86_64、g++、C++14，
+Fast DDS 使用 `/home/jim/cpp/fastdds_2.12/install`。普通构建目录限定为 `example/build/` 或其子目录；
+通信 Demo 保持 `example/demo/build/`。class-loader 插件改为随 BUILD_DIR 存放，
+benchmark 默认目录与使用指南同步调整。此次不改写历史命令中的旧路径。
+
+用户授权清理重复产物；逐目录确认仅有 ELF/.o/.d 和兼容 include 链接，且没有进程使用后执行：
+
+```bash
+rm -r -- /home/jim/cpp/CyberRT/example/build-benchmark /home/jim/cpp/CyberRT/example/build/qos-asan-20260914 /tmp/cmw-p1-normal-20260914
+```
+
+退出 0；删除旧 benchmark、过期 QoS ASan 和重复普通构建目录。
+保留默认构建、最新 P1 ASan、Demo、源码及根 log 中的历史输出。
+
+从独立子目录编译 class-loader 示例和两个插件，再从仓库根目录运行：
+
+```bash
+mkdir -p log/build-layout-20260914
+make -C example BUILD_DIR=/home/jim/cpp/CyberRT/example/build/layout-check OPTFLAGS=-g1 -j3 test_class_loader > log/build-layout-20260914/build-class-loader.log 2>&1
+timeout 30s env CMW_PATH=/home/jim/cpp/CyberRT CMW_IP=127.0.0.1 /home/jim/cpp/CyberRT/example/build/layout-check/bin/test_class_loader > log/build-layout-20260914/run-class-loader.log 2>&1
+make -C class_loader/test BUILD_DIR=/home/jim/cpp/CyberRT/example/build/layout-check OPTFLAGS=-g1 > log/build-layout-20260914/build-legacy-entry.log 2>&1
+```
+
+三条构建/运行命令均退出 0，无 SANITIZE；`OPTFLAGS=-g1` 仅减少调试信息。
+插件生成于 `example/build/layout-check/class_loader/libplugin1.so` 和 `libplugin2.so`；
+运行日志确认从该目录 `dlopen`，注册类并输出 `I am Rect`。示例对不存在的 `Xeee` 类输出预期告警。
+这仍是旧手工示例的加载验证，没有将其升级为正式 `check` 用例，也没有重新运行完整中间件、sanitizer 或 benchmark。
+旧 `class_loader/test` 入口正确转发到统一 Makefile，复用同一目录中已生成的插件；没有写回源码目录。
+
+输出见 [log/build-layout-20260914](../log/build-layout-20260914/)，Logger 仍写根目录 `log/`。

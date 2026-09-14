@@ -19,6 +19,7 @@ public:
               eprosima::fastrtps::rtps::RTPSParticipantListener* listener = nullptr);
     virtual ~Participant();
 
+    // Shutdown is terminal and idempotent. Destruction performs the same cleanup.
     void Shutdown();
     bool is_shutdown() const { return shutdown_.load(); }   
 
@@ -26,7 +27,7 @@ public:
     eprosima::fastrtps::rtps::RTPSParticipant*  fastrtps_participant();
 private:
     //创建一个 rtps的Participant
-  void CreateFastRtpsParticipant(
+  bool CreateFastRtpsParticipant(
       const std::string& name, int send_port,
       eprosima::fastrtps::rtps::RTPSParticipantListener* listener);
 

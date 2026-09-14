@@ -31,7 +31,9 @@ unshare --user --map-root-user --ipc make -C example -j2 check-fast
 | `make -C example -f demo/Makefile -j2 demo-transport` | 只构建新的通信 Demo |
 
 `-j2` 只控制编译并行度；测试进程按顺序运行。不要同时运行多套使用同一通知区的回归。
-默认构建目录是 `example/build/`，二进制在其 `bin/` 下。换编译参数、ABI 或 sanitizer 时使用新的 `BUILD_DIR`，不要混用旧对象。
+默认构建目录是 `example/build/`，二进制在其 `bin/` 下。普通构建的 `BUILD_DIR` 必须是此目录或其子目录，
+例如 `example/build/benchmark/`、`example/build/asan/`；不同编译参数、ABI 或 sanitizer 使用独立子目录，
+不要混用旧对象。通信 Demo 保持 `example/demo/build/`。目录约定见 [AGENTS.md](../AGENTS.md#编译产物归档)。
 
 ### 只运行一个测试
 
@@ -81,12 +83,19 @@ CMW_PATH="$PWD" bash example/run_tests.sh \
 | `test_qos` | 默认值、预设、归一化和非法配置、RTPS 属性映射、心跳单位、元数据、独立缓存、慢消费者及共享 Receiver 冲突 |
 | `test_blocker`、`test_node`、`test_publisher_subscriber` | 基础 API、同进程消息字段往返 |
 | `test_transport_mode_selection` | 按 IP/PID 元数据选路 |
-| `test_shm_segment_robustness`、`test_shm_block_lease_generation` | Segment 边界、Lease、generation、通知完整性 |
+| `test_shm_segment_robustness`、`test_shm_block_lease_generation` | Segment 边界、Lease、generation、通知完整性；双 mmap 延迟挂接被 closing 拒绝、并发最后引用只删除一次 |
 | `test_shm_dispatcher_robustness`、`test_shm_transmitter_receiver` | 异常输入、重建、超限后恢复 |
 | `test_shm_loaned_message`、`test_shm_transmitter_lifecycle_regression`、`test_loaned_message_hybrid` | Loan 存储、只读、epoch 与启停 |
 | `test_hybrid_intra` | 真实 Node/Discovery 同进程通信、多 peer 离开与加入 |
 | `test_intra_transmitter_lifecycle` | 同步重入、发送与后端启停并发 |
 | `test_logger_paths` | 日志路径、追加、轮转和失败处理 |
+| `test_queue_regression` | 4 生产者/4 消费者、非平凡对象绕环、混合等待、停止与满队列拒绝 |
+| `test_croutine_concurrency` | 通知先于挂起、Stop/Resume 与状态字段并发访问 |
+| `test_scheduler_concurrency` | 真实 Scheduler 的 READY→DATA_WAIT 通知，以及运行中 Remove 等待让出 |
+| `test_scheduler_attributes` | 实际 range/1to1 affinity、目标线程 nice、实时优先级参数和权限失败传播 |
+| `test_rtps_dispatcher_decode` | 两个真实分发适配器拒绝空指针、逐字节截断与错误类型，随后合法消息仍可分发 |
+| `test_message_type` | 稳定类型/版本、ABI 回退标识及跨 exec 一致性 |
+| `test_channel_lifecycle` | Reader LEAVE 双索引清理、类型冲突拒绝和 HYBRID peer 检查 |
 
 集成回归：
 
@@ -105,10 +114,37 @@ CMW_PATH="$PWD" bash example/run_tests.sh \
 | `test_loaned_message_rtps_multiprocess` | Loan RTPS 线格式、heap-backed 只读收发 |
 | `test_rtps_transmitter_lifecycle` | RTPS 并发启停、恢复、受控 Hybrid 路由变化 |
 | `test_loaned_message_discovery_churn` | 持续 Loan 发布下的多轮 INTRA/SHM 订阅变化与混合拓扑 |
-| `test_discovery_late_join` | Publisher 先启动，三个全新 exec 进程读取旧 Writer 公告并连续接收；正常退出后再加入 |
+| `test_discovery_late_join` | Publisher 先启动，三个全新 exec 进程读取旧 Writer 公告并连续接收；正常退出后再加入；先发现远端 Writer，再拒绝本地异型 Subscriber，同类型仍接收 |
+| `test_discovery_lifecycle` | 初始化失败与重试、部分创建回滚、在途回调关闭屏障、重复关闭和重建 |
 
 `test_node_manager`、`test_channel_manager`、`test_croutine`、`test_scheduler`、`test_task`、`test_class_loader`
 仍是旧手工检查，不属于 `check`。能单独构建不代表已经有完整自动验收合同。
+class-loader 的插件由 `make -C example class-loader-plugins` 构建到 `BUILD_DIR/class_loader/`，
+测试程序使用编译时的插件路径，可从仓库根目录启动；`make -C class_loader/test` 转发到同一构建入口。
+
+### P1 正确性回归
+
+以上队列、协程、调度、类型及 Discovery 用例纳入 `check`。`test_node` 还检查初始化失败返回空指针、
+同频道类型冲突及 Subscriber 退出后保留的接收器类型约束。调度属性测试使用本机允许的 CPU 集；
+不足两个 CPU 时跳过多 CPU 区分步骤。FIFO/RR 没有权限时打印 LIMIT，仍验证正确参数和错误返回，
+不能据此声称实际获得了实时调度。RTPS 解码回归直接驱动生产适配器，不创建网络端点。
+
+队列及协程字段测试提供不链接 DDS 的独立 TSan 目标：
+
+```bash
+export CMW_PATH="$PWD"
+make -C example BUILD_DIR="$PWD/example/build/tsan" SANITIZE=thread -j2 \
+  test_queue_regression test_croutine_concurrency
+TSAN_OPTIONS=halt_on_error=1 setarch x86_64 -R bash example/run_tests.sh \
+  --bin-dir "$PWD/example/build/tsan/bin" --timeout 30 \
+  test_queue_regression test_croutine_concurrency
+```
+
+`setarch -R` 只为该测试进程及其子进程关闭 ASLR，用于避开本机 TSan 地址映射冲突；
+若宿主禁止此操作或 sanitizer 无法启动，应记录环境失败。此处 TSan 检查队列与协程并发字段路径，
+不代表整个调度器、手写上下文切换汇编或 Fast DDS 已经完成竞态验证。
+Discovery 回归需要可创建本机 DDS 端点，沿用 integration 的 90 秒超时和 IPC 隔离方式。
+各测试关闭自身端点，只有测试独占共享区可以清理；不删除宿主其他进程资源。
 
 ### Notifier 槽位保护回归
 
@@ -129,7 +165,7 @@ exec 用例验证独立打开和广播，以及错误长度、magic、版本、�
 ### 共享区无 vptr 回归
 
 `test_shm_segment_exec` 使用 fork+exec 打开真实 POSIX/XSI Segment，校验读写、重开与布局拒绝；父进程 waitpid 截止为 10 秒。
-拒绝用例检查旧虚表布局、错误尾标记/ABI/容量、截断以及 State 与尾标记不一致，并确认共享字节未被修改。
+拒绝用例检查旧虚表布局、v2 引用协议、错误尾标记/ABI/容量、截断以及 State 与尾标记不一致，并确认共享字节未被修改。
 
 ```bash
 export CMW_PATH="$PWD"
@@ -139,7 +175,7 @@ unshare --user --map-root-user --ipc bash example/run_tests.sh \
   test_shm_segment_exec test_shm_segment_robustness test_posix_segment_multiprocess
 ```
 
-只清理本测试创建的资源。[布局兼容性](../README.md#共享区布局-v2-与兼容性)。
+只清理本测试创建的资源。[布局兼容性](../README.md#共享区布局-v3-与兼容性)。
 
 ### 发送端生命周期同步回归
 
@@ -161,7 +197,8 @@ unshare --user --map-root-user --ipc bash example/run_tests.sh \
 
 ```bash
 export CMW_PATH="$PWD"
-BUILD_DIR=$(mktemp -d /tmp/cmw-guide-ubsan-XXXXXX)
+mkdir -p "$PWD/example/build"
+BUILD_DIR=$(mktemp -d "$PWD/example/build/ubsan-XXXXXX")
 make -C example -j2 BUILD_DIR="$BUILD_DIR" SANITIZE=undefined test_shm_segment_exec
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   unshare --user --map-root-user --ipc bash example/run_tests.sh \
@@ -186,7 +223,7 @@ TSan 不证明跨进程同步正确性；`unexpected memory mapping` 属于启�
 以下是可复用命令，实际结果另记 [testlog](testlog.md)：
 
 ```bash
-BUILD_DIR="$PWD/example/build-qos"
+BUILD_DIR="$PWD/example/build/qos"
 make -C example BUILD_DIR="$BUILD_DIR" -j2 test_qos test_qos_rtps test_node test_discovery_late_join
 CMW_PATH="$PWD" CMW_IP=127.0.0.1 GTEST_FILTER='*' \
   unshare --user --map-root-user --ipc bash example/run_tests.sh \
@@ -223,7 +260,7 @@ CMW_PATH="$PWD" CMW_IP=127.0.0.1 GTEST_FILTER='*' \
 
 ```bash
 export CMW_PATH="$PWD"
-BUILD_DIR="$PWD/example/build-benchmark"
+BUILD_DIR="$PWD/example/build/benchmark"
 make -C example -j2 BUILD_DIR="$BUILD_DIR" OPTFLAGS='-O2 -DNDEBUG' shm_benchmark_sender shm_benchmark_receiver
 "$BUILD_DIR/bin/shm_benchmark_receiver" --self-test
 PYTHONDONTWRITEBYTECODE=1 python3 example/test_shm_benchmark_stats.py
@@ -255,7 +292,7 @@ runner 要求输出目录在 `log/` 下且尚不存在，自动创建；不要�
 
 ```bash
 # 终端一
-CMW_PATH="$PWD" ./example/build-benchmark/bin/shm_benchmark_receiver \
+CMW_PATH="$PWD" ./example/build/benchmark/bin/shm_benchmark_receiver \
   --mode loan --size 4096 --channel manual_shm_bench_1 \
   --control "$PWD/log/manual_shm_bench_1.sock" --output "$PWD/log/manual_shm_bench_1-receiver.json" \
   --warmup-ms 1000 --duration-ms 5000 --drain-ms 1000
@@ -263,7 +300,7 @@ CMW_PATH="$PWD" ./example/build-benchmark/bin/shm_benchmark_receiver \
 
 ```bash
 # 终端二
-CMW_PATH="$PWD" ./example/build-benchmark/bin/shm_benchmark_sender \
+CMW_PATH="$PWD" ./example/build/benchmark/bin/shm_benchmark_sender \
   --mode loan --size 4096 --channel manual_shm_bench_1 \
   --control "$PWD/log/manual_shm_bench_1.sock" --output "$PWD/log/manual_shm_bench_1-sender.json" \
   --warmup-ms 1000 --duration-ms 5000 --drain-ms 1000
@@ -321,7 +358,8 @@ CPU 采样使用 CLOCK_PROCESS_CPUTIME_ID，任一采样边界延迟超过 20 ms
 - `CMW_PATH` 指向仓库根目录，Fast DDS 目录通过 `FAST_DDS_HOME` 指定；不需要修改系统配置来运行这些示例。
 - 遇到 `incompatible notifier shm layout`，先用同一独立 IPC 环境运行相关进程。不要清空 `/dev/shm`、批量 ipcrm 或删除归属不明的通知区。
 - 正常测试按自身所有权回收资源；异常退出时只检查记录中的确切 PID、channel 段名和 socket。确认无人使用前不手动删除共享资源。
-- `make -C example clean` 删除其 BUILD_DIR 和原 class-loader 插件产物，保留日志；不会替你停止运行中的程序。
+- `make -C example clean` 删除所选 BUILD_DIR（含其子目录、class-loader 插件），保留日志与 Demo；
+  只清理某种配置时传入相应的 BUILD_DIR。不会替你停止运行中的程序。
 - 同机自动 SHM、同机强制 RTPS、受控 host 路由和真实跨主机必须分开记录。正常退出恢复不等于 SIGKILL 崩溃恢复。
 
 ## 日志路径回归与输出保存
