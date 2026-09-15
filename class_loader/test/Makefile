@@ -1,23 +1,10 @@
-CC = g++
-CFLAGS = -std=c++14
+# Keep this legacy entry point, with all output managed by example/Makefile.
+PROJECT_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
+BUILD_DIR ?= $(PROJECT_ROOT)/example/build
 
-INCLUDE := -I/home/timer/gtest/build/_install/include \
-		   -I../../../ \
+.PHONY: all libplugin1.so libplugin2.so clean
+all libplugin1.so libplugin2.so:
+	$(MAKE) -C "$(PROJECT_ROOT)/example" BUILD_DIR="$(abspath $(BUILD_DIR))" class-loader-plugins
 
-deps:= ../../log/logger.cpp \
-	   ../class_loader.cpp \
-	   ../utility/class_factory.cpp \
-	   ../shared_library/shared_library.cpp \
-
-all: libplugin1.so libplugin2.so
-
-libplugin1.so: 
-	g++ -shared -fPIC -o $@ $(deps) plugin1.cc $(INCLUDE)
-
-libplugin2.so: 
-	g++ -shared -fPIC -o $@ $(deps) plugin2.cc $(INCLUDE)
-
-# 清理规则
-.PHONY: clean
 clean:
-	rm -rf *.so
+	$(MAKE) -C "$(PROJECT_ROOT)/example" BUILD_DIR="$(abspath $(BUILD_DIR))" clean-class-loader-plugins

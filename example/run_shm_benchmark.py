@@ -83,7 +83,7 @@ def summarize(rows):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bin-dir", type=Path, default=ROOT / "example/build-benchmark/bin")
+    parser.add_argument("--bin-dir", type=Path, default=ROOT / "example/build/benchmark/bin")
     parser.add_argument("--output-dir", type=Path, required=True, help="fresh directory under project log/")
     parser.add_argument("--sizes", type=int, nargs="+", default=[4096, 65536, 1048576, 4194304])
     parser.add_argument("--warmup-ms", type=int, default=1000)

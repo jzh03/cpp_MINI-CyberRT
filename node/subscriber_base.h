@@ -12,6 +12,7 @@
 
 
 #include <cmw/config/RoleAttributes.h>
+#include <cmw/config/message_type.h>
 #include <cmw/common/macros.h>
 #include <cmw/event/perf_event_cache.h>
 #include <cmw/transport/transport.h>
@@ -96,6 +97,49 @@ protected:
 
 };
 
+// ReceiverManager caches one transport receiver per MessageT/channel for the
+// process lifetime. Keep the channel's message type bound for the same
+// lifetime, so a later ReceiverManager with a different C++ type cannot appear
+// to succeed while the shared Dispatcher still owns the original handler.
+class ReceiverChannelTypeRegistry {
+ public:
+    bool IsCompatible(const std::string& channel_name,
+                      const std::string& message_type) {
+        if (channel_name.empty() || message_type.empty()) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto existing = message_types_.find(channel_name);
+        return existing == message_types_.end() ||
+            config::IsMessageTypeCompatible(existing->second, message_type);
+    }
+
+    template <typename CreateFn>
+    bool BindOrCreate(const std::string& channel_name,
+                      const std::string& message_type,
+                      CreateFn&& create) {
+        if (channel_name.empty() || message_type.empty()) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto existing = message_types_.find(channel_name);
+        if (existing != message_types_.end() &&
+            !config::IsMessageTypeCompatible(existing->second, message_type)) {
+            AERROR << "Conflicting message type for cached receiver: "
+                   << channel_name;
+            return false;
+        }
+        if (!create()) return false;
+        if (existing == message_types_.end()) {
+            message_types_.emplace(channel_name, message_type);
+        }
+        return true;
+    }
+
+ private:
+    std::mutex mutex_;
+    std::unordered_map<std::string, std::string> message_types_;
+    DECLARE_SINGLETON(ReceiverChannelTypeRegistry)
+};
+
+inline ReceiverChannelTypeRegistry::ReceiverChannelTypeRegistry() {}
+
 
 template <typename MessageT>
 class ReceiverManager{
@@ -117,22 +161,43 @@ ReceiverManager<MessageT>::ReceiverManager() {}
 template <typename MessageT>
 auto ReceiverManager<MessageT>::GetReceiver(const RoleAttributes& role_attr) ->
                 typename std::shared_ptr<transport::Receiver<MessageT>>{
-    
+    RoleAttributes normalized_attr(role_attr);
+    normalized_attr.message_type = config::MessageTypeIdentifier<MessageT>(
+        normalized_attr.message_type);
+    if (normalized_attr.message_type.empty()) {
+        AERROR << "Invalid receiver message type identifier";
+        return nullptr;
+    }
     std::lock_guard<std::mutex> lg(receiver_map_mutex_);
-    const std::string& channel_name = role_attr.channel_name;
-    //确保一个channel只有一个receiver
+    const std::string& channel_name = normalized_attr.channel_name;
+    auto existing = receiver_map_.find(channel_name);
+    if (existing != receiver_map_.end() && existing->second &&
+        !config::SameQosProfile(existing->second->attributes().qos_profile,
+                                normalized_attr.qos_profile)) {
+        AERROR << "Conflicting QoS for shared receiver: " << channel_name;
+        return nullptr;
+    }
+    // Ensure one compatible Receiver per channel and message type.
     if(receiver_map_.count(channel_name) == 0){
-        receiver_map_[channel_name] = 
-                transport::Transport::Instance()->CreateReceiver<MessageT>(
-                    role_attr, [](const std::shared_ptr<MessageT>& msg,
+        std::shared_ptr<transport::Receiver<MessageT>> created;
+        const bool bound = ReceiverChannelTypeRegistry::Instance()->BindOrCreate(
+            channel_name, normalized_attr.message_type, [&]() {
+                created = transport::Transport::Instance()->CreateReceiver<MessageT>(
+                    normalized_attr, [](const std::shared_ptr<MessageT>& msg,
                                   const transport::MessageInfo& msg_info,
                                   const RoleAttributes& subscriber_attr){
                             data::DataDispatcher<MessageT>::Instance()->Dispatch(
                                 subscriber_attr.channel_id, msg);
                             }
                 );
+                return created != nullptr;
+            });
+        if (!bound) return nullptr;
+        receiver_map_[channel_name] = std::move(created);
     }
-    return receiver_map_[channel_name];
+    auto result = receiver_map_[channel_name];
+    if (!result) receiver_map_.erase(channel_name);
+    return result;
 
 }
 

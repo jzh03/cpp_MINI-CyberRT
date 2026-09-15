@@ -43,8 +43,11 @@ TaskManager::TaskManager() : task_queue_size_(1000),
 TaskManager::~TaskManager() { Shutdown(); }
 
 void TaskManager::Shutdown() {
-  if (stop_.exchange(true)) {
-    return;
+  {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (stop_.exchange(true)) {
+      return;
+    }
   }
   for (uint32_t i = 0; i < num_threads_; i++) {
     scheduler::Instance()->RemoveTask(task_prefix + std::to_string(i));

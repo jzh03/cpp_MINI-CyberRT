@@ -1,5 +1,6 @@
 #include <cmw/transport/common/endpoint.h>
 #include <cmw/common/global_data.h>
+#include <stdexcept>
 
 
 
@@ -9,6 +10,9 @@ namespace transport {
 
 
 Endpoint::Endpoint(const RoleAttributes& attr) : enabled_(false), id_() , attr_(attr){
+    std::string error;
+    if (!config::NormalizeQosProfile(attr_.qos_profile, &attr_.qos_profile, &error))
+        throw std::invalid_argument(error);
 
     if(!attr_.host_name.empty()){
         attr_.host_name = common::GlobalData::Instance()->HostName();

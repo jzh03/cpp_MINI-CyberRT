@@ -19,7 +19,7 @@ struct SegmentLayoutHeader {
 };
 
 const uint64_t kSegmentLayoutMagic = 0x434d5753484d3541ULL;
-const uint32_t kSegmentLayoutVersion = 2;
+const uint32_t kSegmentLayoutVersion = 3;
 
 SegmentLayoutHeader* GetLayoutHeader(void* managed_shm, const ShmConf& conf)
 {
@@ -220,9 +220,7 @@ bool Segment::Destroy(){
 
     try
     {
-        state_->DecreaseReferenceCounts();
-        uint32_t reference_counts = state_->reference_counts();
-        if(reference_counts == 0){
+        if(state_->ReleaseReference()){
             return Remove();
         }
     }

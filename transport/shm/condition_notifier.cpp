@@ -18,7 +18,7 @@ using common::Hash;
 
 namespace {
 constexpr uint64_t kNotifierMagic = 0x434d574e4f544631ULL;
-constexpr uint32_t kNotifierVersion = 1;  // Independent of Payload Segment v2.
+constexpr uint32_t kNotifierVersion = 1;  // Independent of the Payload Segment layout version.
 
 class TryLock {
 public:

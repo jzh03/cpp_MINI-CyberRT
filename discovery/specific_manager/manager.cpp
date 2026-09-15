@@ -1,5 +1,6 @@
 
 #include <cmw/discovery/specific_manager/manager.h>
+#include <exception>
 #include <limits>
 #include <cmw/common/global_data.h>
 #include <cmw/transport/rtps/attributes_filler.h>
@@ -25,6 +26,8 @@ Manager::Manager()
       change_type_(ChangeType::CHANGE_PARTICIPANT),
       channel_name_(""),
       writer_(nullptr),
+      writer_history_(nullptr),
+      reader_history_(nullptr),
       reader_(nullptr),
       listener_(nullptr) {
   host_name_ = common::GlobalData::Instance()->HostName();
@@ -35,6 +38,11 @@ Manager::~Manager() { Shutdown(); }
 
 //开启服务发现机制
 bool Manager::StartDiscovery(RtpsParticipant* participant){
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+    if (is_shutdown_.load()) {
+        AERROR << "cannot restart a shutdown discovery manager";
+        return false;
+    }
     if (participant == nullptr) {
         return false;
     }
@@ -43,10 +51,17 @@ bool Manager::StartDiscovery(RtpsParticipant* participant){
         return true;
     }
 
-    //创建 rtpsWriter 和 rtspReader
-    if(!CreateWriter(participant) || !CreateReader(participant)){
+    bool created = false;
+    try {
+        created = CreateWriter(participant) && CreateReader(participant);
+    } catch (const std::exception& error) {
+        AERROR << "exception while creating discovery endpoints: " << error.what();
+    } catch (...) {
+        AERROR << "unknown exception while creating discovery endpoints";
+    }
+    if(!created){
         AERROR << "create writer or reader failed.";
-        StopDiscovery();
+        StopDiscoveryLocked();
         return false;
     }
     return true;
@@ -54,26 +69,33 @@ bool Manager::StartDiscovery(RtpsParticipant* participant){
 
 //终止服务发现机制
 void Manager::StopDiscovery(){
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+    StopDiscoveryLocked();
+}
+
+void Manager::StopDiscoveryLocked() {
     if (!is_discovery_started_.exchange(false)) {
         return;
     }
+
+    // Stop and drain user callbacks before removing any resource they access.
+    if (listener_ != nullptr) listener_->Stop();
+    if(reader_ != nullptr){
+        eprosima::fastrtps::rtps::RTPSDomain::removeRTPSReader(reader_);
+        reader_ = nullptr;
+    }
+    reader_history_.reset();
+    listener_.reset();
+
     //为什么移除writer需要加锁
     {
         std::lock_guard<std::mutex> lg(lock_);
         if(writer_ != nullptr){
             //从rtpsRTPSDomain 中移除writer
             eprosima::fastrtps::rtps::RTPSDomain::removeRTPSWriter(writer_);
+            writer_ = nullptr;
         }
-    }
-
-    if(reader_ != nullptr){
-        //从rtpsRTPSDomain 中移除reader
-        eprosima::fastrtps::rtps::RTPSDomain::removeRTPSReader(reader_);
-    }
-
-    if(listener_ != nullptr){
-        delete listener_;
-        listener_ = nullptr;
+        writer_history_.reset();
     }
 }
 
@@ -104,7 +126,7 @@ bool Manager::Join(const RoleAttributes& attr, RoleType role,
     //填充msg
     Convert(attr, role, OperateType::OPT_JOIN, &msg);
     //处理msg
-    Dispose(msg);
+    if (!Dispose(msg)) return false;
     //广播msg
     if (need_write) {
         return Write(msg);
@@ -122,7 +144,7 @@ bool Manager::Leave(const RoleAttributes& attr, RoleType role){
     RETURN_VAL_IF(!Check(attr), false);
     ChangeMsg msg;
     Convert(attr, role, OperateType::OPT_LEAVE, &msg);
-    Dispose(msg);
+    if (!Dispose(msg)) return false;
     if (NeedPublish(msg)) {
         return Write(msg);
     }
@@ -146,17 +168,35 @@ bool Manager::CreateReader(RtpsParticipant* participant){
 
     RtpsReaderAttributes reader_attr;
 
-    AttributesFiller::FillInReaderAttr(
-                channel_name_ , QosProfileConf::QOS_PROFILE_TOPO_CHANGE , &reader_attr);
+    if (!AttributesFiller::FillInReaderAttr(
+                channel_name_, QosProfileConf::QOS_PROFILE_TOPO_CHANGE, &reader_attr))
+      return false;
 
-    listener_ = new ReaderListener(
-            std::bind(&Manager::OnRemoteChange, this , std::placeholders::_1));
-    eprosima::fastrtps::rtps::ReaderHistory* mp_history = new ReaderHistory(reader_attr.hatt);
+    auto listener = std::unique_ptr<ReaderListener>(new ReaderListener(
+            std::bind(&Manager::OnRemoteChange, this , std::placeholders::_1)));
+    auto history = std::unique_ptr<QosReaderHistory>(new QosReaderHistory(
+        reader_attr.hatt, QosProfileConf::QOS_PROFILE_TOPO_CHANGE));
 
-    reader_ = RTPSDomain::createRTPSReader(participant , reader_attr.ratt , mp_history ,listener_);
+    auto* reader = RTPSDomain::createRTPSReader(participant, reader_attr.ratt,
+                                                history.get(), listener.get());
+    if (!reader) return false;
 
-    bool reg = participant->registerReader(reader_ , reader_attr.Tatt , reader_attr.Rqos);
-    return reg;
+    bool registered = false;
+    try {
+        registered = participant->registerReader(
+            reader, reader_attr.Tatt, reader_attr.Rqos);
+    } catch (...) {
+        RTPSDomain::removeRTPSReader(reader);
+        throw;
+    }
+    if (!registered) {
+        RTPSDomain::removeRTPSReader(reader);
+        return false;
+    }
+    reader_ = reader;
+    reader_history_ = std::move(history);
+    listener_ = std::move(listener);
+    return true;
 }
 
 //创建rtpsWriter
@@ -164,17 +204,33 @@ bool Manager::CreateWriter(RtpsParticipant* participant){
     // 创建 RtpsWriter 的配置信息实例
     RtpsWriterAttributes writer_attr; 
     // 填充 RtpsWriter 的配置信息
-    AttributesFiller::FillInWriterAttr(
-        channel_name_, QosProfileConf::QOS_PROFILE_TOPO_CHANGE,&writer_attr);
+    if (!AttributesFiller::FillInWriterAttr(
+        channel_name_, QosProfileConf::QOS_PROFILE_TOPO_CHANGE, &writer_attr))
+      return false;
     
     //创建rtps writer history
-    writer_history_ = new WriterHistory(writer_attr.hatt);
+    auto history = std::unique_ptr<QosWriterHistory>(new QosWriterHistory(
+        writer_attr.hatt, QosProfileConf::QOS_PROFILE_TOPO_CHANGE));
     //创建rtps writer
-    writer_ = RTPSDomain::createRTPSWriter(participant , writer_attr.watt , writer_history_);
+    auto* writer = RTPSDomain::createRTPSWriter(
+        participant, writer_attr.watt, history.get());
+    if (!writer) return false;
     //注册rtps writer
-    bool reg = participant->registerWriter(writer_ , writer_attr.Tatt , writer_attr.Wqos);
-
-    return reg;
+    bool registered = false;
+    try {
+        registered = participant->registerWriter(
+            writer, writer_attr.Tatt, writer_attr.Wqos);
+    } catch (...) {
+        RTPSDomain::removeRTPSWriter(writer);
+        throw;
+    }
+    if (!registered) {
+        RTPSDomain::removeRTPSWriter(writer);
+        return false;
+    }
+    writer_ = writer;
+    writer_history_ = std::move(history);
+    return true;
 }
 
 bool Manager::NeedPublish(const ChangeMsg& msg) const {
@@ -184,7 +240,7 @@ bool Manager::NeedPublish(const ChangeMsg& msg) const {
 
 
 void Manager::OnRemoteChange(const std::string& str_msg){
-    if(is_shutdown_.load()){
+    if(is_shutdown_.load() || !is_discovery_started_.load()){
         ADEBUG <<  "the manager has been shut down.";
         return;
     }
@@ -194,7 +250,11 @@ void Manager::OnRemoteChange(const std::string& str_msg){
 
     serialize::DataStream ds(str_msg);
     //需要将str_msg 反序列化成ChangeMsg类型的msg
-    ds >> msg;
+    if (!ds.read(msg) || !config::NormalizeQosProfile(
+            msg.role_attr.qos_profile, &msg.role_attr.qos_profile)) {
+        AERROR << "Invalid or incompatible Discovery metadata";
+        return;
+    }
 
     //判断是否是同一进程
     if(IsFromSameProcess(msg)){
@@ -205,7 +265,7 @@ void Manager::OnRemoteChange(const std::string& str_msg){
 
     RETURN_IF(!Check(msg.role_attr));
 
-    Dispose(msg);
+    (void)Dispose(msg);
     
 
 }
@@ -275,12 +335,12 @@ bool Manager::Write(const ChangeMsg& msg){
   }
   change->serializedPayload.length = static_cast<uint32_t>(size);
   std::memcpy(change->serializedPayload.data, ds.data(), size);
-  bool added = writer_history_->add_change(change);
+  eprosima::fastrtps::rtps::WriteParams params;
+  bool added = writer_history_->AddChange(change, params);
   if(!added) {
-    writer_->remove_older_changes(20);
-    added = writer_history_->add_change(change);
+    writer_->release_change(change);
+    AERROR << "Discovery history full or submission failed: " << channel_name_;
   }
-  if(!added) writer_->release_change(change);
   return added;
 }
 

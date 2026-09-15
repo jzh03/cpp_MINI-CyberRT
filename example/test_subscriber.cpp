@@ -94,12 +94,6 @@ void SubscriberTest1(){
         r.Shutdown();
     }
 
-    auto qos = &role.qos_profile;
-    qos->history = QosHistoryPolicy::HISTORY_KEEP_LAST;
-    qos->depth = 1;
-    qos->mps = 0;
-    qos->reliability = QosReliabilityPolicy::RELIABILITY_RELIABLE;
-    qos->durability = QosDurabilityPolicy::DURABILITY_VOLATILE;
     role.channel_name = "/chatter0";
 
     {
@@ -125,12 +119,6 @@ void SubscriberTest1(){
 
 void SubscriberTest2(){
     RoleAttributes role;
-    auto qos = &role.qos_profile;
-    qos->history = QosHistoryPolicy::HISTORY_KEEP_LAST;
-    qos->depth = 0;
-    qos->mps = 0;
-    qos->reliability = QosReliabilityPolicy::RELIABILITY_RELIABLE;
-    qos->durability = QosDurabilityPolicy::DURABILITY_VOLATILE;
     role.channel_name = "/chatter0";
 
     Subscriber<Chatter> r(role,callback,100);

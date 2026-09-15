@@ -47,6 +47,10 @@ void ReaListener::onNewCacheChangeAdded(
         std::make_shared<std::string>((char*)change->serializedPayload.data,change->serializedPayload.length);
 
     
+    // The payload and metadata have been copied. Consuming this cache keeps
+    // RTPS history bounded independently of the scheduler and observation queues.
+    reader->getHistory()->remove_change(
+        const_cast<eprosima::fastrtps::rtps::CacheChange_t*>(change));
     callback_(channel_id,msg_str, msg_info_);
 }
 

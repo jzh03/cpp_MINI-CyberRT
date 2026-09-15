@@ -141,7 +141,6 @@ bool PosixSegment::OpenOrCreate() {
         return false;
     }
 
-    state_->IncreaseReferenceCounts();
     init_ = true;
     return true;
 }
@@ -232,7 +231,11 @@ bool PosixSegment::OpenOnly(){
         return false;
    }
 
-    state_->IncreaseReferenceCounts();
+    if(!state_->TryAcquireReference()) {
+        std::cout << "shared memory segment is closing." << std::endl;
+        Reset();
+        return false;
+    }
     init_ = true;
     std::cout  << "open only true." << std::endl;
     return true; 

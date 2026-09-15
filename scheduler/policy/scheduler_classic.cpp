@@ -5,6 +5,7 @@
 #include <cmw/scheduler/policy/scheduler_classic.h>
 #include <cmw/config/cmw_conf.h>
 #include <cmw/config/conf_parse.h>
+#include <stdexcept>
 
 namespace hnu    {
 namespace cmw   {
@@ -38,7 +39,9 @@ SchedulerClassic::SchedulerClassic(){
         if(!cfg.scheduler_conf.process_level_cpuset.empty()){
             process_level_cpuset_ = cfg.scheduler_conf.process_level_cpuset;
             AINFO << "scheduler_conf.process_level_cpuset: " << cfg.scheduler_conf.process_level_cpuset;
-            ProcessLevelResourceControl();
+            if (!ProcessLevelResourceControl()) {
+                throw std::runtime_error("Failed to apply process CPU affinity");
+            }
         }
 
         classic_conf_ = cfg.scheduler_conf.classic_conf;
@@ -113,7 +116,9 @@ void SchedulerClassic::CreateProcessor(){
 
         std::vector<int> cpuset;
 
-        ParseCpuset(group.cpuset, &cpuset);
+        if (!ParseCpuset(group.cpuset, &cpuset)) {
+            throw std::invalid_argument("Invalid scheduler group CPU set");
+        }
         // 根据proc_num数量创建Processor
         for(uint32_t i=0; i<proc_num; i++){
             auto ctx = std::make_shared<ClassicContext>(group_name);
@@ -122,9 +127,12 @@ void SchedulerClassic::CreateProcessor(){
             auto proc = std::make_shared<Processor>();
             proc->BindContext(ctx);
 
-            SetSchedAffinity(proc->Thread(), cpuset, affinity, i);
-            SetSchedPolicy(proc->Thread(), processor_policy, processor_prio,
-                     proc->Tid());
+            if (!SetSchedAffinity(proc->Thread(), cpuset, affinity, i) ||
+                !SetSchedPolicy(proc->Thread(), processor_policy, processor_prio,
+                                proc->Tid())) {
+                proc->Stop();
+                throw std::runtime_error("Failed to apply scheduler thread attributes");
+            }
             processors_.emplace_back(proc);
         }
     }
@@ -188,10 +196,9 @@ bool SchedulerClassic::NotifyProcessor(uint64_t crid) {
         ReadLockGuard<AtomicRWLock> lk(id_cr_lock_);
         if(id_cr_.find(crid) != id_cr_.end()){
             auto cr = id_cr_[crid];
-            if(cr->state() == RoutineState::DATA_WAIT || 
-               cr->state() == RoutineState::IO_WAIT ){
-               cr->SetUpdateFlag();
-            }
+            // Record every notification. In particular, a notification may
+            // arrive just before the routine changes READY -> DATA_WAIT.
+            cr->SetUpdateFlag();
 
             ClassicContext::Notify(cr->group_name());
             return true;

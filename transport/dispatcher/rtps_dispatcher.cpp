@@ -17,24 +17,36 @@ void RtpsDispatcher::Shutdown() {
   {
     std::lock_guard<std::mutex> lock(readers_mutex_);
     for (auto& item : readers_) {
+      if (item.second.reader && participant_ && !participant_->is_shutdown())
+        RTPSDomain::removeRTPSReader(item.second.reader);
       item.second.reader = nullptr;
+      delete item.second.mp_history;
+      item.second.mp_history = nullptr;
     }
+    readers_.clear();
   }
 
   participant_ = nullptr;
 }
 
-void RtpsDispatcher::AddReader(const RoleAttributes& self_attr) {
-    if (participant_ == nullptr) {
+bool RtpsDispatcher::AddReader(const RoleAttributes& self_attr,
+                               const std::function<void()>& attach,
+                               const std::function<void()>& detach) {
+    if (is_shutdown_.load() || participant_ == nullptr || participant_->is_shutdown()) {
     std::cout << "please set participant firstly." << std::endl;
-    return;
+    return false;
   }
 
     uint64_t channel_id = self_attr.channel_id;
     std::lock_guard<std::mutex> lock(readers_mutex_);
 
     if(readers_.count(channel_id) > 0){
-        return;
+        if (!config::SameQosProfile(readers_.at(channel_id).qos, self_attr.qos_profile)) {
+            AERROR << "Conflicting QoS for shared RTPS reader: " << self_attr.channel_name;
+            return false;
+        }
+        attach();
+        return true;
     }
 
     //创建一个reader
@@ -42,23 +54,41 @@ void RtpsDispatcher::AddReader(const RoleAttributes& self_attr) {
     //填充reader的配置信息
     RtpsReaderAttributes reader_attr;
 
-    auto& qos = self_attr.qos_profile;
-    AttributesFiller::FillInReaderAttr(self_attr.channel_name , qos , &reader_attr);
+    if (!config::NormalizeQosProfile(self_attr.qos_profile, &new_reader.qos) ||
+        !AttributesFiller::FillInReaderAttr(self_attr.channel_name, new_reader.qos,
+                                           &reader_attr)) {
+        AERROR << "Invalid RTPS reader QoS: " << self_attr.channel_name;
+        return false;
+    }
+    auto* participant = participant_->fastrtps_participant();
+    if (!participant) return false;
     //创建reader的回调函数
     new_reader.reader_listener = std::make_shared<ReaListener>(
         std::bind(&RtpsDispatcher::OnMessage, this, std::placeholders::_1,
                 std::placeholders::_2, std::placeholders::_3),self_attr.channel_name);
     //创建rtps reader history
-    new_reader.mp_history = new ReaderHistory(reader_attr.hatt);
+    new_reader.mp_history = new QosReaderHistory(reader_attr.hatt, new_reader.qos);
     //创建rtps reader
     new_reader.reader = RTPSDomain::createRTPSReader(
-                    participant_->fastrtps_participant(),reader_attr.ratt , new_reader.mp_history,
+                    participant, reader_attr.ratt, new_reader.mp_history,
                     new_reader.reader_listener.get());
+    if (!new_reader.reader) {
+        delete new_reader.mp_history;
+        return false;
+    }
+    // A matching writer may deliver data as soon as registerReader completes.
+    attach();
     //注册rtps reader
-    bool reg =  participant_->fastrtps_participant()->registerReader(new_reader.reader,reader_attr.Tatt,reader_attr.Rqos);
+    bool reg = participant->registerReader(new_reader.reader, reader_attr.Tatt, reader_attr.Rqos);
+    if (!reg) {
+        RTPSDomain::removeRTPSReader(new_reader.reader);
+        delete new_reader.mp_history;
+        detach();
+        return false;
+    }
 
     readers_[channel_id] = new_reader;          
-
+    return true;
 }
 
 void RtpsDispatcher::OnMessage(uint64_t channel_id,

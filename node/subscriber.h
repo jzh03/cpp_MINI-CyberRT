@@ -2,10 +2,12 @@
 #define CMW_NODE_WRITER_H_
 
 #include <memory>
+#include <limits>
 #include <string>
 #include <vector>
 
 #include <cmw/node/subscriber_base.h>
+#include <cmw/common/global_data.h>
 #include <cmw/transport/transport.h>
 #include <cmw/transport/common/identity.h>
 #include <cmw/transport/receiver/receiver.h>
@@ -24,6 +26,7 @@ template <typename M0>
 using CallbackFunc = std::function<void(const std::shared_ptr<M0>&)>;
 
 const uint32_t DEFAULT_PENDING_QUEUE_SIZE = 1;
+const uint32_t DEFAULT_OBSERVATION_HISTORY_DEPTH = 1;
 
 template <typename MessageT>
 class Subscriber : public SubscriberBase {
@@ -38,7 +41,8 @@ public:
 
     explicit Subscriber(const RoleAttributes& role_attr,
                         const CallbackFunc<MessageT>& subscriber_func = nullptr,
-                        uint32_t pending_queue_size = DEFAULT_PENDING_QUEUE_SIZE);
+                        uint32_t pending_queue_size = DEFAULT_PENDING_QUEUE_SIZE,
+                        uint32_t history_depth = DEFAULT_OBSERVATION_HISTORY_DEPTH);
     virtual ~Subscriber();
     bool Init() override;
     void Shutdown() override;
@@ -138,7 +142,7 @@ protected:
     uint32_t pending_queue_size_;
 
 private:
-    void JoinTheTopology();
+    bool JoinTheTopology();
     void LeaveTheTopology();
     void OnChannelChange(const ChangeMsg& change_msg);
 
@@ -159,13 +163,14 @@ private:
 template <typename MessageT>
 Subscriber<MessageT>::Subscriber(const RoleAttributes& role_attr,
                         const CallbackFunc<MessageT>& subscriber_func,
-                        uint32_t pending_queue_size)
+                        uint32_t pending_queue_size,
+                        uint32_t history_depth)
                         : SubscriberBase(role_attr) ,
                           subscriber_func_(subscriber_func),
                           pending_queue_size_(pending_queue_size){ 
     //新建一个Blocker
     blocker_.reset(new blocker::Blocker<MessageT>(blocker::BlockerAttr(
-        role_attr.qos_profile.depth, role_attr.channel_name)));
+        history_depth, role_attr.channel_name)));
 }
 
 template <typename MessageT>
@@ -188,6 +193,29 @@ void Subscriber<MessageT>::Observe(){
 
 template <typename MessageT>
 bool Subscriber<MessageT>::Init(){
+    if (role_attr_.channel_name.empty()) {
+        AERROR << "Invalid subscriber channel name";
+        return false;
+    }
+    if (role_attr_.channel_id == 0) {
+        role_attr_.channel_id =
+            common::GlobalData::RegisterChannel(role_attr_.channel_name);
+    }
+    role_attr_.message_type =
+        config::MessageTypeIdentifier<MessageT>(role_attr_.message_type);
+    if (role_attr_.message_type.empty()) {
+        AERROR << "Invalid subscriber message type identifier";
+        return false;
+    }
+    std::string error;
+    if (!config::NormalizeQosProfile(role_attr_.qos_profile,
+                                     &role_attr_.qos_profile, &error) ||
+        pending_queue_size_ == 0 ||
+        pending_queue_size_ > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+        AERROR << "Invalid subscriber configuration: " << error
+               << " pending_queue_size=" << pending_queue_size_;
+        return false;
+    }
     if(init_.exchange(true)){
         return true;
     }
@@ -222,10 +250,21 @@ bool Subscriber<MessageT>::Init(){
     // ReceiverManager 可按 channel 共享 Receiver，但 Discovery 中的 Reader 必须唯一。
     role_attr_.id = identity_.HashValue();
     receiver_ = ReceiverManager<MessageT>::Instance()->GetReceiver(role_attr_);
+    if (!receiver_) {
+        sched->RemoveTask(croutine_name_);
+        init_.store(false);
+        return false;
+    }
 
     channel_manager_ = discovery::TopologyManager::Instance()->channel_manager();
 
-    JoinTheTopology();
+    if (channel_manager_ == nullptr || !JoinTheTopology()) {
+        receiver_ = nullptr;
+        channel_manager_ = nullptr;
+        sched->RemoveTask(croutine_name_);
+        init_.store(false);
+        return false;
+    }
 
     return true;
 }
@@ -245,7 +284,7 @@ void Subscriber<MessageT>::Shutdown(){
 }
 
 template <typename MessageT>
-void Subscriber<MessageT>::JoinTheTopology(){
+bool Subscriber<MessageT>::JoinTheTopology(){
     change_conn_ = channel_manager_->AddChangeListener(std::bind(
         &Subscriber<MessageT>::OnChannelChange , this , std::placeholders::_1));
     
@@ -255,7 +294,17 @@ void Subscriber<MessageT>::JoinTheTopology(){
     for (auto& publisher : publishers){
         receiver_->Enable(publisher);
     }
-    channel_manager_->Join(this->role_attr_ , RoleType::ROLE_READER);
+    const bool announced =
+        channel_manager_->Join(this->role_attr_ , RoleType::ROLE_READER);
+    if (!announced && !channel_manager_->HasReader(this->role_attr_)) {
+        channel_manager_->RemoveChangeListener(change_conn_);
+        return false;
+    }
+    if (!announced) {
+        AERROR << "Reader joined locally but Discovery announcement failed: "
+               << this->role_attr_.channel_name;
+    }
+    return true;
 }
 
 template <typename MessageT>

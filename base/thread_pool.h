@@ -72,7 +72,9 @@ auto ThreadPool::Enqueue(F&& f, Args&&... args)
   if (stop_) {
     return std::future<return_type>();
   }
-  task_queue_.Enqueue([task]() { (*task)(); });
+  if (!task_queue_.Enqueue([task]() { (*task)(); })) {
+    return std::future<return_type>();
+  }
   return res;
 };
 

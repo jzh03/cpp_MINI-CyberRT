@@ -164,7 +164,7 @@ void IndependentProcesses(bool xsi)
 // Wire fixtures are deliberately independent of the implementation header.
 struct Header {
     uint64_t magic = 0x434d5753484d3541ULL;
-    uint32_t version = 2;
+    uint32_t version = 3;
     uint32_t state_size = sizeof(State);
     uint32_t block_size = sizeof(Block);
     uint16_t state_align = alignof(State);
@@ -185,7 +185,7 @@ struct OldState {
 void RejectLayouts(bool xsi)
 {
     ShmConf conf;
-    for(int scenario = 0; scenario < 12; ++scenario){
+    for(int scenario = 0; scenario < 13; ++scenario){
         Resource resource(xsi);
         size_t size = conf.managed_shm_size();
         if(scenario == 2) size = 1;
@@ -211,10 +211,15 @@ void RejectLayouts(bool xsi)
             if(scenario == 7) ++header.block_align;
             if(scenario == 8) header.ceiling = 123;
             if(scenario == 9){
-                auto state = new (resource.addr) State(131072);
-                state->IncreaseReferenceCounts();
+                new (resource.addr) State(131072);
             }
             if(scenario == 11) ++header.state_align;
+            if(scenario == 12) {
+                // The former v2 layout has the same object sizes, but its
+                // reference-count protocol cannot interoperate with v3.
+                new (resource.addr) State(header.ceiling);
+                header.version = 2;
+            }
             std::memcpy(static_cast<char*>(resource.addr) + size - sizeof(header),
                         &header, sizeof(header));
         }

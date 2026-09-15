@@ -1,43 +1,72 @@
-# FastRtps文档
+# Fast DDS 环境检查
 
-## 1. FastDDS安装
+本仓库通过 Fast DDS 的 **RTPS 层接口**完成发现和 RTPS 消息收发。
+本项目的 SHM Segment/Notifier 是另一套实现，不要与 Fast DDS 自带的共享内存传输混为一谈。
 
-官网：[3. Linux installation from sources — Fast DDS 2.13.1 documentation (eprosima.com)](https://fast-dds.docs.eprosima.com/en/latest/installation/sources/sources_linux.html)
+## 1. 确认安装目录
 
-编译安装的过程在上面的官网已经说得十分明白，我在这里说几个编译安装过程中可能遇到的`BUG`
+现有 Makefile 默认使用 `$HOME/cpp/fastdds_2.12/install`。本地验收使用 Fast DDS 2.12，不能据此保证其他大版本兼容。
+在仓库根目录执行：
 
-- 对于`OpenEuler`系统，`FastDDS`依赖的一些库需要使用`rpm`包管理器安装
+```bash
+export FAST_DDS_HOME="$HOME/cpp/fastdds_2.12/install"
+make -C example FAST_DDS_HOME="$FAST_DDS_HOME" check-fastdds
+```
 
-- 编译`FastDDS`所需的`Cmake`版本较高，请先升级`Cmake`版本
+将变量值改为自己的安装目录。命令退出 0 只表示所需文件存在，还需要构建和收发验证。
 
-- 在安装`Foonathan memory`这个库时，可能会出现如下问题
+[Makefile](../example/Makefile) 检查以下文件：
 
-  ![image-20240204213639210](image/image-20240204213639210.png)
+```text
+include/fastrtps/rtps/RTPSDomain.h
+include/fastrtps/rtps/participant/RTPSParticipant.h
+lib/libfastrtps.so
+lib/libfastcdr.so
+lib/libfoonathan_memory-0.7.3.so
+```
 
-  这里是`cmake`找到了`Foonathan memory`这个库，从而不会去编译源码，导致安装失败，原因在于如果你的主机里安装了`ROS2`，`ROS2`里有`Foonathan memory`相关的`cmake`文件，而`ROS2`里的这个库实际上是个空壳子。为了解决这个问题，只需要在编译`Foonathan memory`时先去把`ROS2`的环境变量注释了，一般来说是在`.bashrc`中，把下面的环境变量注释即可，编译完成后再解除注释
+## 2. 构建并验证
 
-  ![image-20240204214203254](image/image-20240204214203254.png)
+```bash
+make -C example -f demo/Makefile -j2 demo-transport
+./example/demo/run_demo.sh E --no-build
+```
 
-- 在编译完成`FastDDS`后可以去跑一下`example`下的`demo`，官方给出的编译方式似乎有点问题，请按照下面这篇博文去做：
+E 是两个本机进程**强制 RTPS**收发。出现 RTPS ENABLED 还不够，需要首条有效消息和场景 PASS。
+完整步骤见 [Demo 指南](../example/demo/README.md)。
 
-  [【FastDDS学习笔记】HelloWorld示例程序编译和运行_fastdds helloword-CSDN博客](https://bylee.blog.csdn.net/article/details/124705821)
+依赖检查、构建、启动和有效接收是逐层验证关系；任一层成功都不能代替下一层。按下图定位最先失败的层级：
 
-  主要的原因就在：`cmake .. -DCMAKE_PREFIX_PATH=~/Fast-DDS/install/` 这里`Cmake`编译时需要加一个路径参数
+```mermaid
+flowchart TD
+    A[设置 FAST_DDS_HOME] --> B[check-fastdds<br/>检查指定头文件和动态库]
+    B --> C{所需文件齐全？}
+    C -- 否 --> X[修正安装目录或安装产物]
+    C -- 是，只证明文件存在 --> D[构建 demo-transport]
+    D --> E{编译和链接成功？}
+    E -- 否 --> Y[核对头库版本、ABI 和链接库名]
+    E -- 是，只证明可构建 --> F[运行本机场景 E]
+    F --> G{出现 RTPS ENABLED？}
+    G -- 否 --> Z[检查启动、参数和 runtime 日志]
+    G -- 是，只证明后端启用 --> H{FIRST_VALID、CONTIGUOUS_10<br/>及场景 PASS？}
+    H -- 否 --> Z
+    H -- 是 --> I[本机双进程显式 RTPS 收发有效]
+    I --> J[不等于真实跨主机已验证]
+```
 
-## 2. FastDDS的版本说明
+构建会添加 Fast DDS 的 include/lib 路径，并把库目录写入 rpath；通常不需要另设 `LD_LIBRARY_PATH`。
+C++14 构建保留 `-faligned-new`，链接还需要 pthread、uuid、rt、atomic、dl；正式测试另外依赖 GoogleTest。
 
-可以看见`FastDDS`现在的架构有四层`Application`、`DDS`层、`RTPS`层`Transport`层
+## 3. 常见问题
 
-- `DDS`层是对`RTPS`层的抽象，可以看见`DDS`层里有很多角色，如：`Publisher`、`Subscriber`、`DataWriter`、`DataReader`、`Topic`、`DomainParticipant`等，反而搞得很复杂
-- 而`RTPS`层相对而言比较清晰简单`RTPSWriter`用于发送数据，`RTPSReader`用于读取数据，`RTPSParticipant`用于区分不同进程
-- `Transport`层则为底层通信实现，可以看见它支持`udp`、`tcp`、`shm`三种通信方式
+| 报错或现象 | 处理方法 |
+| --- | --- |
+| `Missing Fast DDS file` | 检查 `FAST_DDS_HOME` 是否指向安装目录，而不是源码目录 |
+| 找不到 `foonathan_memory-0.7.3` | 现有入口链接此库名；核对安装产物，不要随意把其他 ABI 的库改名 |
+| 编译提示 API 不匹配 | 检查头文件和库是否来自同一版本，避免混用 ROS 等环境中的依赖 |
+| 程序启动找不到 `.so` | 检查编译时目录是否被移动，以及 `ldd example/demo/build/bin/demo_transport` 的输出 |
+| 修改依赖路径后仍异常 | 重新构建自己的 Demo 构建目录，避免复用旧对象 |
+| 已启用 RTPS 但无有效接收 | 检查两端参数与运行日志；本机强制模式通过不代表跨机器已验证 |
 
-![library_overview](image/library_overview-17070545619883.svg)
-
-- `FastDDS`的早期版本其实不叫`FastDDS`，而是直接叫`Fast-Rtps`，意味着早期并没有实现`DDS`协议，并且不支持`shm`，只支持网络通信，`CyberRt`使用的就是以前这种只支持网络通信的版本作为不同主机之间的通讯协议，因此对于同主机之间不同进程的通信，`CyberRt`内部自己实现了基于共享内存的通信方式。
-
-- 对于`cmw`来说，使用的是现在的`FastDDS`即支持共享内存实现了`DDS`协议的版本，不过并没有采用`DDS`层，而是直接使用了`RTPS`层作为不同主机之间的通信，在`cmw`的内部也自己实现了基于共享内存的通信方式，并没有采用`FastDDS`的共享内存通信方式
-
-  官网：[Getting Started — Fast RTPS 1.9.4 documentation (eprosima.com)](https://fast-rtps.docs.eprosima.com/en/v1.9.4/introduction.html)
-
-![architecture](image/architecture.png)
+本页以已有安装为前提，不自动安装、升级依赖或修改 shell/系统配置。
+RTPS 相关实现可从 [participant.cpp](../transport/rtps/participant.cpp)、[rtps_transmitter.h](../transport/transmitter/rtps_transmitter.h) 和 [rtps_dispatcher.cpp](../transport/dispatcher/rtps_dispatcher.cpp) 开始阅读。

@@ -46,30 +46,33 @@ CRoutine::CRoutine(const std::function<void()> &func) : func_(func) {
     }
 
     MakeContext(CRoutineEntry, this, context_.get());
-    state_ = RoutineState::READY;
+    state_.store(RoutineState::READY, std::memory_order_relaxed);
     updated_.test_and_set(std::memory_order_relaxed);
 }
 
 CRoutine::~CRoutine() { context_ = nullptr; }
 
 RoutineState CRoutine::Resume() {
-    if (cyber_unlikely(force_stop_)) {
-        state_ = RoutineState::FINISHED;
-        return state_;
+    if (cyber_unlikely(force_stop_.load(std::memory_order_acquire))) {
+        state_.store(RoutineState::FINISHED, std::memory_order_release);
+        return RoutineState::FINISHED;
     }
 
-    if (cyber_unlikely(state_ != RoutineState::READY)) {
+    if (cyber_unlikely(state_.load(std::memory_order_acquire) !=
+                       RoutineState::READY)) {
         AERROR << "Invalid Routine State!";
-        return state_;
+        return state_.load(std::memory_order_acquire);
     }
 
     current_routine_ = this;
     SwapContext(GetMainStack(), GetStack());
     current_routine_ = nullptr;
-    return state_;
+    return state_.load(std::memory_order_acquire);
 }
 
-void CRoutine::Stop() { force_stop_ = true; }
+void CRoutine::Stop() {
+    force_stop_.store(true, std::memory_order_release);
+}
 
 }
 }

@@ -3,12 +3,14 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 
 #include <cmw/base/signal.h>
 #include <cmw/config/topology_change.h>
 #include <cmw/discovery/communication/reader_listener.h>
+#include <cmw/transport/rtps/qos_history.h>
 
 #include <fastrtps/rtps/reader/RTPSReader.h>
 #include <fastrtps/rtps/writer/RTPSWriter.h>
@@ -98,15 +100,17 @@ public:
 protected:
 
     
-    bool CreateWriter(RtpsParticipant* participant);
-    bool CreateReader(RtpsParticipant* participant);
+    virtual bool CreateWriter(RtpsParticipant* participant);
+    virtual bool CreateReader(RtpsParticipant* participant);
+    void StopDiscoveryLocked();
 
     
 
     //检查attr是否完整
     virtual bool Check(const RoleAttributes& attr) = 0;
 
-    virtual void Dispose(const ChangeMsg& msg) = 0;
+    // Return false when the change is rejected and must not be advertised.
+    virtual bool Dispose(const ChangeMsg& msg) = 0;
 
     //判断是否需要发送ChangeMsg
     virtual bool NeedPublish(const ChangeMsg& msg) const;
@@ -137,16 +141,18 @@ protected:
     std::string host_name_;
     int process_id_;
     std::string channel_name_;
+    std::mutex lifecycle_mutex_;
     std::mutex lock_;
 
 
     eprosima::fastrtps::rtps::RTPSWriter* writer_;
-    eprosima::fastrtps::rtps::WriterHistory* writer_history_;
+    std::unique_ptr<transport::QosWriterHistory> writer_history_;
+    std::unique_ptr<transport::QosReaderHistory> reader_history_;
 
     
     eprosima::fastrtps::rtps::RTPSReader* reader_;
     //fastrtps关于ChangeMsg的回调
-    ReaderListener* listener_;
+    std::unique_ptr<ReaderListener> listener_;
     //以ChangeMsg作为信号
     ChangeSignal signal_;
 };

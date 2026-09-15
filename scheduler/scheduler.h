@@ -53,8 +53,9 @@ public:
 
     virtual bool RemoveTask(const string& name) = 0;
 
-    void ProcessLevelResourceControl();
-    void SetInnerThreadAttr(const std::string& name, std::thread* thr);
+    bool ProcessLevelResourceControl();
+    bool SetInnerThreadAttr(const std::string& name, std::thread* thr,
+                            pid_t tid = -1);
 
     virtual bool DispatchTask(const std::shared_ptr<CRoutine>&) = 0;
     virtual bool NotifyProcessor(uint64_t crid) = 0;

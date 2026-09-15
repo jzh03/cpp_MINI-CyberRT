@@ -22,17 +22,31 @@ bool ChannelManager::Check(const RoleAttributes& attr){
     RETURN_VAL_IF(attr.channel_name.empty(),false);
     RETURN_VAL_IF(!attr.channel_id, false);
     RETURN_VAL_IF(!attr.id, false);
+    RETURN_VAL_IF(attr.message_type.empty(), false);
     return true;
 }
 
 
 bool ChannelManager::IsMessageTypeMatching(const std::string& lhs, const std::string& rhs){
-    if(lhs == rhs){
-        return true;
+    return config::IsMessageTypeCompatible(lhs, rhs);
+}
+
+bool ChannelManager::HasCompatibleMessageType(
+    const std::string& channel_name, const std::string& message_type) {
+    if (channel_name.empty() || message_type.empty()) {
+        return false;
     }
-
-
-    return false;
+    std::lock_guard<std::mutex> lock(topology_mutex_);
+    const uint64_t key = common::GlobalData::RegisterChannel(channel_name);
+    RoleAttrVec roles;
+    channel_writers_.Search(key, &roles);
+    channel_readers_.Search(key, &roles);
+    for (const auto& attr : roles) {
+        if (!IsMessageTypeMatching(attr.message_type, message_type)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 //拿到所有的channel_name，保存到channels中
@@ -79,6 +93,11 @@ bool ChannelManager::HasWriter(const std::string& channel_name)
     return channel_writers_.Search(key);
 }
 
+bool ChannelManager::HasWriter(const RoleAttributes& attr) {
+    std::lock_guard<std::mutex> lock(topology_mutex_);
+    return channel_writers_.Search(attr);
+}
+
 void ChannelManager::GetWriters(RoleAttrVec* writers) {
   RETURN_IF_NULL(writers);
   channel_writers_.GetAllRoles(writers);
@@ -87,6 +106,11 @@ void ChannelManager::GetWriters(RoleAttrVec* writers) {
 bool ChannelManager::HasReader(const std::string& channel_name) {
   uint64_t key = common::GlobalData::RegisterChannel(channel_name);
   return channel_readers_.Search(key);
+}
+
+bool ChannelManager::HasReader(const RoleAttributes& attr) {
+    std::lock_guard<std::mutex> lock(topology_mutex_);
+    return channel_readers_.Search(attr);
 }
 
 void ChannelManager::GetReaders(RoleAttrVec* readers) {
@@ -124,7 +148,7 @@ void ChannelManager::GetWritersOfNode(const std::string& node_name,
   node_writers_.Search(key, writers);
 }
 
-void ChannelManager::ScanMessageType(const ChangeMsg& msg){
+bool ChannelManager::ScanMessageType(const ChangeMsg& msg){
 
     uint64_t key = msg.role_attr.channel_id;
     std::string role_type("reader");
@@ -143,6 +167,7 @@ void ChannelManager::ScanMessageType(const ChangeMsg& msg){
              << "] does not match the exsited writer(belongs to node["
              << w_attr.node_name << "])'s message type["
              << w_attr.message_type << "]." << std::endl;
+            return false;
         }
     }
 
@@ -158,13 +183,19 @@ void ChannelManager::ScanMessageType(const ChangeMsg& msg){
              << "] does not match the exsited reader(belongs to node["
              << r_attr.node_name << "])'s message type["
              << r_attr.message_type << "]." << std::endl;
+            return false;
       }
     }
+    return true;
 }
 
 
-void ChannelManager::DisposeJoin(const ChangeMsg& msg){
-    ScanMessageType(msg);
+bool ChannelManager::DisposeJoin(const ChangeMsg& msg){
+    if (!ScanMessageType(msg)) {
+        AERROR << "Rejecting endpoint with incompatible message type on channel "
+               << msg.role_attr.channel_name;
+        return false;
+    }
 
     //以Node作为顶点
     Vertice v(msg.role_attr.node_name);
@@ -191,9 +222,10 @@ void ChannelManager::DisposeJoin(const ChangeMsg& msg){
     }
     //将此边加入图中
     node_graph_.Insert(e);
+    return true;
 }
 
-void ChannelManager::DisposeLeave(const ChangeMsg& msg){
+bool ChannelManager::DisposeLeave(const ChangeMsg& msg){
 
     Vertice v(msg.role_attr.node_name);
     Edge e;
@@ -205,23 +237,29 @@ void ChannelManager::DisposeLeave(const ChangeMsg& msg){
         e.set_src(v);
     } else {
         auto role = std::make_shared<RoleReader>(msg.role_attr , msg.timestamp);
-        node_readers_.Remove(role->attributes().channel_id, role);
+        node_readers_.Remove(role->attributes().node_id, role);
         channel_readers_.Remove(role->attributes().channel_id, role);
         //设置此边的目标顶点
         e.set_dst(v);
     }
 
     node_graph_.Delete(e);
-
+    return true;
 }
 
-void ChannelManager::Dispose(const ChangeMsg& msg){
+bool ChannelManager::Dispose(const ChangeMsg& msg){
+    bool accepted = false;
+    {
+      std::lock_guard<std::mutex> lock(topology_mutex_);
     if(msg.operate_type == OperateType::OPT_JOIN){
-        DisposeJoin(msg);
+        accepted = DisposeJoin(msg);
     } else {
-        DisposeLeave(msg);
+        accepted = DisposeLeave(msg);
     }
+    }
+    if (!accepted) return false;
     Notify(msg);
+    return true;
 }
 
 
@@ -338,15 +376,13 @@ void ChannelManager::OnTopoModuleLeave(const std::string& host_name,
     for( auto& writer : writers_to_remove){
         Convert(writer->attributes(), RoleType::ROLE_WRITER, OperateType::OPT_LEAVE,
             &msg);
-        DisposeLeave(msg);
-        Notify(msg);
+        Dispose(msg);
     }
 
     for (auto& reader : readers_to_remove) {
         Convert(reader->attributes(), RoleType::ROLE_READER, OperateType::OPT_LEAVE,
             &msg);
-        DisposeLeave(msg);
-        Notify(msg);
+        Dispose(msg);
     }
 
 }

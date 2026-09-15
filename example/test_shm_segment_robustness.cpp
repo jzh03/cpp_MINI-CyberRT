@@ -1,13 +1,21 @@
 #include <poll.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <new>
+#include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -23,6 +31,37 @@ namespace {
 const uint64_t kSmallMessageSize = 1024;
 const uint64_t kOneMegabyte = 1024 * 1024;
 const uint64_t kEightMegabytes = 8 * 1024 * 1024;
+
+struct PosixStateMappings
+{
+    explicit PosixStateMappings(std::string value) : name(std::move(value)) {}
+
+    ~PosixStateMappings()
+    {
+        if(opener_mapping != MAP_FAILED) {
+            munmap(opener_mapping, sizeof(State));
+        }
+        if(creator_mapping != MAP_FAILED) {
+            munmap(creator_mapping, sizeof(State));
+        }
+        if(opener_fd >= 0) {
+            close(opener_fd);
+        }
+        if(creator_fd >= 0) {
+            close(creator_fd);
+        }
+        if(owns_name) {
+            shm_unlink(name.c_str());
+        }
+    }
+
+    std::string name;
+    bool owns_name = false;
+    int creator_fd = -1;
+    int opener_fd = -1;
+    void* creator_mapping = MAP_FAILED;
+    void* opener_mapping = MAP_FAILED;
+};
 
 // Keep Segment's real acquire, recreate, and Block locking behavior while
 // replacing the operating-system shared-memory mapping with test-owned memory.
@@ -308,6 +347,82 @@ TEST(ShmSegmentRobustnessTest, ReadIndexIsValidatedAfterRemap)
     EXPECT_EQ(nullptr, block.buf);
     EXPECT_EQ(remapped_conf.block_num(), segment.block_num());
     EXPECT_EQ(1u, segment.open_only_count());
+}
+
+TEST(ShmSegmentRobustnessTest, MappedOpenerCannotAttachAfterClosingStarts)
+{
+    PosixStateMappings resources(
+        "/cmw_closing_attach_" +
+        std::to_string(static_cast<long>(getpid())) + "_" +
+        std::to_string(std::chrono::steady_clock::now()
+                           .time_since_epoch().count()));
+    resources.creator_fd =
+        shm_open(resources.name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+    resources.owns_name = resources.creator_fd >= 0;
+    ASSERT_NE(-1, resources.creator_fd);
+    ASSERT_EQ(0, ftruncate(resources.creator_fd, sizeof(State)));
+    resources.creator_mapping =
+        mmap(nullptr, sizeof(State), PROT_READ | PROT_WRITE, MAP_SHARED,
+             resources.creator_fd, 0);
+    ASSERT_NE(MAP_FAILED, resources.creator_mapping);
+    State* creator_state =
+        new (resources.creator_mapping) State(kSmallMessageSize);
+
+    // Complete the second mmap, then pause before the attach CAS.  This is the
+    // exact window that used to let an opener retain an unlinked incarnation.
+    resources.opener_fd = shm_open(resources.name.c_str(), O_RDWR, 0600);
+    ASSERT_NE(-1, resources.opener_fd);
+    resources.opener_mapping =
+        mmap(nullptr, sizeof(State), PROT_READ | PROT_WRITE, MAP_SHARED,
+             resources.opener_fd, 0);
+    ASSERT_NE(MAP_FAILED, resources.opener_mapping);
+    State* const already_mapped =
+        static_cast<State*>(resources.opener_mapping);
+
+    EXPECT_EQ(1u, creator_state->reference_counts());
+    ASSERT_TRUE(creator_state->ReleaseReference());
+    ASSERT_TRUE(creator_state->is_closing());
+    ASSERT_EQ(0, shm_unlink(resources.name.c_str()));
+
+    EXPECT_FALSE(already_mapped->TryAcquireReference());
+    EXPECT_TRUE(already_mapped->is_closing());
+    EXPECT_EQ(0u, already_mapped->reference_counts());
+
+}
+
+TEST(ShmSegmentRobustnessTest, LastReferenceHasOneRemovalWinner)
+{
+    const uint32_t owner_count = 32;
+    State state(kSmallMessageSize);
+    for(uint32_t i = 1; i < owner_count; ++i) {
+        ASSERT_TRUE(state.TryAcquireReference());
+    }
+    ASSERT_EQ(owner_count, state.reference_counts());
+
+    std::atomic<bool> start(false);
+    std::atomic<uint32_t> removal_winners(0);
+    std::vector<std::thread> owners;
+    owners.reserve(owner_count);
+    for(uint32_t i = 0; i < owner_count; ++i) {
+        owners.emplace_back([&]() {
+            while(!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            if(state.ReleaseReference()) {
+                removal_winners.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for(auto& owner : owners) {
+        owner.join();
+    }
+
+    EXPECT_EQ(1u, removal_winners.load());
+    EXPECT_TRUE(state.is_closing());
+    EXPECT_EQ(0u, state.reference_counts());
+    EXPECT_FALSE(state.ReleaseReference());
+    EXPECT_FALSE(state.TryAcquireReference());
 }
 
 }  // namespace

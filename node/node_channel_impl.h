@@ -5,6 +5,7 @@
 #include <string>
 
 #include <cmw/common/global_data.h>
+#include <cmw/config/message_type.h>
 #include <cmw/node/subscriber.h>
 #include <cmw/node/publisher.h>
 
@@ -15,26 +16,15 @@ class Node;
 
 struct SubscriberConfig
 {
-    SubscriberConfig(){
-        qos_profile.history = QosHistoryPolicy::HISTORY_KEEP_LAST;
-        qos_profile.depth = 1;
-        qos_profile.mps = 0;
-        qos_profile.reliability = QosReliabilityPolicy::RELIABILITY_RELIABLE;
-        qos_profile.durability = QosDurabilityPolicy::DURABILITY_VOLATILE;
-    }
-
-    SubscriberConfig(const SubscriberConfig& other)
-        : channel_name(other.channel_name),
-          qos_profile(other.qos_profile),
-          pending_queue_size(other.pending_queue_size) {}
-
     std::string channel_name;
     QosProfile qos_profile;
     /**
      * @brief configuration for responding ChannelBuffer.
      * Older messages will dropped if you have no time to handle
      */
-    uint32_t pending_queue_size;
+    uint32_t pending_queue_size = DEFAULT_PENDING_QUEUE_SIZE;
+    // Independent observation cache; zero disables observation retention.
+    uint32_t history_depth = DEFAULT_OBSERVATION_HISTORY_DEPTH;
 };
 
 
@@ -60,8 +50,23 @@ public:
         node_attr_.node_id = node_id;
 
         if(is_reality_mode_) {
-            node_manager_ = discovery::TopologyManager::Instance()->node_manager();
-            node_manager_->Join(node_attr_, RoleType::ROLE_NODE);
+            auto topology = discovery::TopologyManager::Instance();
+            if (!topology->IsInitialized()) {
+                AERROR << "Topology manager initialization failed";
+                return;
+            }
+            node_manager_ = topology->node_manager();
+            if (node_manager_ == nullptr) {
+                AERROR << "Node manager is unavailable: " << node_name_;
+                return;
+            }
+            if (!node_manager_->Join(node_attr_, RoleType::ROLE_NODE)) {
+                AERROR << "Node topology join failed: " << node_name_;
+                node_manager_->Leave(node_attr_, RoleType::ROLE_NODE);
+                node_manager_ = nullptr;
+                return;
+            }
+            joined_ = true;
         }
     }
 
@@ -69,10 +74,11 @@ public:
      * @brief Destroy the Node Channel Impl object
      */
     virtual ~NodeChannelImpl() {
-        if (is_reality_mode_) {
-        node_manager_->Leave(node_attr_, RoleType::ROLE_NODE);
-        node_manager_ = nullptr;
+        if (joined_ && node_manager_ != nullptr) {
+            node_manager_->Leave(node_attr_, RoleType::ROLE_NODE);
         }
+        joined_ = false;
+        node_manager_ = nullptr;
     }
 
     /**
@@ -81,6 +87,7 @@ public:
      * @return const std::string& actual node name
      */
     const std::string& NodeName() const { return node_name_; }
+    bool IsValid() const { return !is_reality_mode_ || joined_; }
 
 private:
 
@@ -105,7 +112,8 @@ private:
     template <typename MessageT>
     auto CreateSubscriber(const RoleAttributes& role_attr,
                         const CallbackFunc<MessageT>& reader_func,
-                        uint32_t pending_queue_size = DEFAULT_PENDING_QUEUE_SIZE)
+                        uint32_t pending_queue_size = DEFAULT_PENDING_QUEUE_SIZE,
+                        uint32_t history_depth = DEFAULT_OBSERVATION_HISTORY_DEPTH)
         -> std::shared_ptr<Subscriber<MessageT>>;
 
     template <typename MessageT>
@@ -113,12 +121,15 @@ private:
         -> std::shared_ptr<Subscriber<MessageT>>;
 
     template <typename MessageT>
-    void FillInAttr(RoleAttributes* attr);
+    bool FillInAttr(RoleAttributes* attr);
+
+    bool IsMessageTypeAvailable(const RoleAttributes& attr) const;
 
     bool is_reality_mode_;
     std::string node_name_;
     RoleAttributes node_attr_;
     NodeManagerPtr node_manager_ = nullptr;
+    bool joined_ = false;
 
 };
 
@@ -132,7 +143,9 @@ auto NodeChannelImpl::CreatePublisher(const RoleAttributes& role_attr)
     }
 
     RoleAttributes new_attr(role_attr);
-    FillInAttr<MessageT>(&new_attr);
+    if (!FillInAttr<MessageT>(&new_attr) || !IsMessageTypeAvailable(new_attr)) {
+        return nullptr;
+    }
 
     std::shared_ptr<Publisher<MessageT>> publisher_ptr = nullptr;
     
@@ -170,13 +183,15 @@ auto NodeChannelImpl::CreateSubscriber(const SubscriberConfig& config,
     role_attr.channel_name = config.channel_name;
     role_attr.qos_profile = config.qos_profile;
     return this->template CreateSubscriber<MessageT>(role_attr, reader_func,
-                                               config.pending_queue_size);
+                                               config.pending_queue_size,
+                                               config.history_depth);
 }
 
 template <typename MessageT>
 auto NodeChannelImpl::CreateSubscriber(const RoleAttributes& role_attr,
                                    const CallbackFunc<MessageT>& reader_func,
-                                   uint32_t pending_queue_size)
+                                   uint32_t pending_queue_size,
+                                   uint32_t history_depth)
         -> std::shared_ptr<Subscriber<MessageT>> {
     
     if(role_attr.channel_name.empty()){
@@ -185,12 +200,15 @@ auto NodeChannelImpl::CreateSubscriber(const RoleAttributes& role_attr,
     }
 
     RoleAttributes new_attr(role_attr);
-    FillInAttr<MessageT>(&new_attr);
+    if (!FillInAttr<MessageT>(&new_attr) || !IsMessageTypeAvailable(new_attr)) {
+        return nullptr;
+    }
 
     std::shared_ptr<Subscriber<MessageT>> subscriber_ptr = nullptr;
 
     subscriber_ptr = std::make_shared<Subscriber<MessageT>>(new_attr, reader_func,
-                                                            pending_queue_size);
+                                                            pending_queue_size,
+                                                            history_depth);
     RETURN_VAL_IF_NULL(subscriber_ptr, nullptr);
     RETURN_VAL_IF(!subscriber_ptr->Init(), nullptr);
     return subscriber_ptr;
@@ -198,15 +216,46 @@ auto NodeChannelImpl::CreateSubscriber(const RoleAttributes& role_attr,
 
 
 template <typename MessageT>
-void NodeChannelImpl::FillInAttr(RoleAttributes* attr){
+bool NodeChannelImpl::FillInAttr(RoleAttributes* attr){
+    if (attr == nullptr) {
+        return false;
+    }
     attr->host_name = node_attr_.host_name;
     attr->host_ip = node_attr_.host_ip;
     attr->process_id = node_attr_.process_id;
-    attr->node_name = node_attr_.node_id;
+    attr->node_name = node_attr_.node_name;
     attr->node_id = node_attr_.node_id;
 
     auto channel_id = common::GlobalData::RegisterChannel(attr->channel_name);
     attr->channel_id = channel_id;
+    attr->message_type = config::MessageTypeIdentifier<MessageT>(attr->message_type);
+    if (attr->message_type.empty()) {
+        AERROR << "Message type identifier is empty: " << attr->channel_name;
+        return false;
+    }
+    return true;
+}
+
+inline bool NodeChannelImpl::IsMessageTypeAvailable(
+    const RoleAttributes& attr) const {
+    auto topology = discovery::TopologyManager::Instance();
+    auto channel_manager = topology->channel_manager();
+    if (!topology->IsInitialized() || channel_manager == nullptr) {
+        AERROR << "Channel discovery is unavailable";
+        return false;
+    }
+    if (!channel_manager->HasCompatibleMessageType(attr.channel_name,
+                                                   attr.message_type)) {
+        AERROR << "Conflicting message type for channel: " << attr.channel_name;
+        return false;
+    }
+    if (!ReceiverChannelTypeRegistry::Instance()->IsCompatible(
+            attr.channel_name, attr.message_type)) {
+        AERROR << "Conflicting cached receiver message type for channel: "
+               << attr.channel_name;
+        return false;
+    }
+    return true;
 }
 
 

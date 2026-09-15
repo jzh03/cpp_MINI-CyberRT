@@ -108,7 +108,6 @@ bool XsiSegment::OpenOrCreate() {
         return false;
     }
 
-    state_->IncreaseReferenceCounts();
     init_ = true;
     ADEBUG << "open or create true.";
     return true;
@@ -177,7 +176,11 @@ bool XsiSegment::OpenOnly(){
         return false;
     }
 
-    state_->IncreaseReferenceCounts();
+    if(!state_->TryAcquireReference()) {
+        ADEBUG << "shared memory segment is closing.";
+        Reset();
+        return false;
+    }
     init_ = true;
     ADEBUG << "open only true.";
     return true;

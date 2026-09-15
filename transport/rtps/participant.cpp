@@ -29,39 +29,36 @@ Participant::Participant(const std::string& name, int send_port,
       fastrtps_participant_(nullptr) {}
 
 
-Participant::~Participant() {}
+Participant::~Participant() { Shutdown(); }
 
 
 //移除具体的fastrtps_participant
 void Participant::Shutdown() {
-  if (shutdown_.exchange(true)) {
-    return;
-  }
-
-  std::lock_guard<std::mutex> lk(mutex_);
-  if (fastrtps_participant_ != nullptr) {
-    eprosima::fastrtps::rtps::RTPSDomain::removeRTPSParticipant(fastrtps_participant_);
+  eprosima::fastrtps::rtps::RTPSParticipant* participant = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (shutdown_.exchange(true)) return;
+    participant = fastrtps_participant_;
     fastrtps_participant_ = nullptr;
     listener_ = nullptr;
   }
+  if (participant != nullptr) {
+    eprosima::fastrtps::rtps::RTPSDomain::removeRTPSParticipant(participant);
+  }
 }
 
-eprosima::fastrtps::rtps::RTPSParticipant*  Participant::fastrtps_participant() {
-
-  if (shutdown_.load()) {
-    return nullptr;
-  }
-
+eprosima::fastrtps::rtps::RTPSParticipant* Participant::fastrtps_participant() {
   std::lock_guard<std::mutex> lk(mutex_);
+  if (shutdown_.load()) return nullptr;
   if (fastrtps_participant_ != nullptr) {
     return fastrtps_participant_;
   }
 
-  CreateFastRtpsParticipant(name_, send_port_, listener_);
+  if (!CreateFastRtpsParticipant(name_, send_port_, listener_)) return nullptr;
   return fastrtps_participant_;
 }
 
-void Participant::CreateFastRtpsParticipant(
+bool Participant::CreateFastRtpsParticipant(
       const std::string& name, int send_port,
       eprosima::fastrtps::rtps::RTPSParticipantListener* listener){
 
@@ -89,7 +86,7 @@ void Participant::CreateFastRtpsParticipant(
         ip_env = ip_val;
         if (ip_env.empty()) {
           AERROR << "invalid CMW_IP (an empty string)";
-          return;
+          return false;
         }
       }
       ADEBUG << "cmw ip: " << ip_env;
@@ -107,7 +104,7 @@ void Participant::CreateFastRtpsParticipant(
 
       //创建participant_
       fastrtps_participant_ = RTPSDomain::createParticipant(domain_id,PParam,listener);
-
+      return fastrtps_participant_ != nullptr;
 }
 
 

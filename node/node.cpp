@@ -12,6 +12,10 @@ Node::Node(const std::string& node_name, const std::string& name_space)
 }
 Node::~Node() {}
 
+bool Node::IsValid() const {
+    return node_channel_impl_ != nullptr && node_channel_impl_->IsValid();
+}
+
 const std::string& Node::Name() const { return node_name_; }
 
 void Node::Observe(){

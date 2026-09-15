@@ -14,6 +14,7 @@
 #include <cmw/transport/rtps/attributes_filler.h>
 #include <cmw/transport/rtps/participant.h>
 #include <cmw/transport/rtps/rea_listener.h>
+#include <cmw/transport/rtps/qos_history.h>
 #include <cmw/transport/message/loaned_message.h>
 #include <fastrtps/rtps/rtps_fwd.h>
 #include <cmw/serialize/data_stream.h>
@@ -23,11 +24,12 @@ namespace cmw   {
 namespace transport {
 
 struct Reader {
-    Reader() : reader(nullptr) , reader_listener(nullptr) {}
+    Reader() : reader(nullptr), mp_history(nullptr), reader_listener(nullptr) {}
 
     eprosima::fastrtps::rtps::RTPSReader* reader;
     eprosima::fastrtps::rtps::ReaderHistory* mp_history;
     RealistenerPtr reader_listener;
+    config::QosProfile qos;
 };
 
 class RtpsDispatcher;
@@ -41,11 +43,11 @@ public:
     void Shutdown() override;
 
     template <typename MessageT>
-    void AddListener(const RoleAttributes& self_attr,
+    bool AddListener(const RoleAttributes& self_attr,
                      const MessageListener<MessageT>& listener);
 
     template <typename MessageT>
-    void AddListener(const RoleAttributes& self_attr,
+    bool AddListener(const RoleAttributes& self_attr,
                      const RoleAttributes& opposite_attr,
                      const MessageListener<MessageT>& listener);
 
@@ -53,6 +55,7 @@ public:
         participant_ = participant;
   }
 private:
+    friend class RtpsDispatcherTestAccess;
     template <typename MessageT>
     void AddListenerImpl(const RoleAttributes& self_attr,
                          const MessageListener<MessageT>& listener,
@@ -115,7 +118,9 @@ private:
         return LoanedMessage::DeserializePayload(
             serialized, wire_size, max_payload, channel_id);
     }
-    void AddReader(const RoleAttributes& self_attr);
+    bool AddReader(const RoleAttributes& self_attr,
+                   const std::function<void()>& attach,
+                   const std::function<void()>& detach);
     std::unordered_map<uint64_t , Reader> readers_;
     std::mutex readers_mutex_;
     ParticipantPtr participant_;
@@ -126,10 +131,12 @@ private:
 
 
 template <typename MessageT>
-void RtpsDispatcher::AddListener(const RoleAttributes& self_attr,
+bool RtpsDispatcher::AddListener(const RoleAttributes& self_attr,
                                  const MessageListener<MessageT>& listener) {
-    AddListenerImpl(self_attr, listener,
-                    typename std::is_same<MessageT, LoanedMessage>::type());
+    return AddReader(self_attr, [&] {
+        AddListenerImpl(self_attr, listener,
+                        typename std::is_same<MessageT, LoanedMessage>::type());
+    }, [&] { Dispatcher::RemoveListener<std::string>(self_attr); });
 }
 
 template <typename MessageT>
@@ -139,14 +146,17 @@ void RtpsDispatcher::AddListenerImpl(const RoleAttributes& self_attr,
 
     auto listener_adapter = [listener](const std::shared_ptr<std::string>& msg_str, 
                                        const MessageInfo& msg_info){
+            if (!msg_str) return;
             auto msg = std::make_shared<MessageT>();
             serialize::DataStream ds(*msg_str);
-            ds >> *msg;
+            if (!ds.read(*msg)) {
+                AERROR << "failed to deserialize RTPS message.";
+                return;
+            }
             listener(msg , msg_info);
     };
     //调用基类的AddListener来注册回调函数
     Dispatcher::AddListener<std::string>(self_attr ,listener_adapter);
-    AddReader(self_attr);
 
 }
 
@@ -169,15 +179,20 @@ void RtpsDispatcher::AddListenerImpl(const RoleAttributes& self_attr,
             listener(msg, msg_info);
     };
     Dispatcher::AddListener<std::string>(self_attr, listener_adapter);
-    AddReader(self_attr);
 }
 
 template <typename MessageT>
-void RtpsDispatcher::AddListener(const RoleAttributes& self_attr,
+bool RtpsDispatcher::AddListener(const RoleAttributes& self_attr,
                                  const RoleAttributes& opposite_attr,
                                  const MessageListener<MessageT>& listener){
-    AddListenerImpl(self_attr, opposite_attr, listener,
-                    typename std::is_same<MessageT, LoanedMessage>::type());
+    if (!config::IsQosCompatible(opposite_attr.qos_profile, self_attr.qos_profile)) {
+        AERROR << "Incompatible RTPS writer/reader QoS: " << self_attr.channel_name;
+        return false;
+    }
+    return AddReader(self_attr, [&] {
+        AddListenerImpl(self_attr, opposite_attr, listener,
+                        typename std::is_same<MessageT, LoanedMessage>::type());
+    }, [&] { Dispatcher::RemoveListener<std::string>(self_attr, opposite_attr); });
 }
 
 template <typename MessageT>
@@ -188,15 +203,18 @@ void RtpsDispatcher::AddListenerImpl(const RoleAttributes& self_attr,
 
     auto listener_adapter = [listener](const std::shared_ptr<std::string>& msg_str, 
                                        const MessageInfo& msg_info){
+            if (!msg_str) return;
             auto msg = std::make_shared<MessageT>();
             serialize::DataStream ds(*msg_str);
-            ds >> *msg;
+            if (!ds.read(*msg)) {
+                AERROR << "failed to deserialize RTPS message.";
+                return;
+            }
             listener(msg , msg_info);
     };
     //调用基类的AddListener来注册回调函数
     Dispatcher::AddListener<std::string>(self_attr,opposite_attr,listener_adapter);
     //创建一个rtps reader
-    AddReader(self_attr);
 }
 
 template <typename MessageT>
@@ -219,7 +237,6 @@ void RtpsDispatcher::AddListenerImpl(
     };
     Dispatcher::AddListener<std::string>(self_attr, opposite_attr,
                                          listener_adapter);
-    AddReader(self_attr);
 }
 
 
