@@ -1,93 +1,113 @@
 # 通信流程
 
-Transport 把一条业务消息送到订阅端。普通应用使用 Node 的 Publisher/Subscriber；需要指定后端时才直接使用 Transport。
-
-先在仓库根目录运行：
-
-```bash
-./example/demo/run_demo.sh
-```
-
-A～E 会展示 INTRA、SHM、Loan/View、退出恢复和同机强制 RTPS。[单场景与手动操作](../example/demo/README.md)。
+Transport 负责把业务消息送到订阅端。普通应用使用 Node 的 Publisher/Subscriber；只有需要明确指定
+后端时才直接调用 Transport。完整规格见 [README](../README.md#功能与使用边界)。
 
 ## 一条消息经过哪些层
 
 ```mermaid
 flowchart LR
-    P[Publisher] --> T[HybridTransmitter]
-    T --> I[INTRA]
-    T --> S[SHM]
-    T --> R[RTPS]
-    I --> D[Receiver / Dispatcher]
+    P[Publisher] --> H[HybridTransmitter]
+    H --> I[INTRA]
+    H --> S[SHM]
+    H --> R[RTPS]
+    I --> D[Dispatcher / Receiver]
     S --> D
     R --> D
     D --> V[DataVisitor]
-    V --> C[调度器 / Subscriber 回调]
+    V --> C[Scheduler / Subscriber 回调]
 ```
 
-Discovery 向 Hybrid 提供对端 IP/PID；这一步负责选路，不承载业务 Payload。
-[发现过程](topology.md) 与数据传输是两个需要分别确认的环节。
+Discovery 提供对端 IP、PID 和消息类型，Hybrid 据此选路；Discovery 不承载业务 Payload。
 
 | 双方关系 | 自动后端 | 普通消息的数据处理 |
 | --- | --- | --- |
-| 同 IP、同 PID | INTRA | 将原始 `shared_ptr` 交给进程内 Dispatcher |
-| 同 IP、不同 PID | SHM | 序列化、写入共享 Block、发送通知；接收端读取并反序列化 |
-| 不同 IP | RTPS | 序列化后交给 Fast DDS Writer；Reader 收到后反序列化 |
+| 同 IP、同 PID | INTRA | 传递原始 `shared_ptr` |
+| 同 IP、不同 PID | SHM | 序列化到共享 Block，以通知定位并在接收端解码 |
+| 不同 IP | RTPS | 序列化到 Fast DDS Writer，Reader 收到后解码 |
 
-每种活跃后端发送一次。同模式多个订阅者不重复写入，跨位置订阅者可以使多条后端同时工作。
-默认 HYBRID 等待发现关系；显式 INTRA/SHM/RTPS 创建后立即尝试启用。没有失败自动切换或内部重试。
+每种活跃后端发送一次，同模式多个订阅者不会重复发送。多种位置的订阅者可让多条路径同时活跃。
+默认 HYBRID 等待发现关系；显式 INTRA/SHM/RTPS 端点直接尝试启用。发送失败时不会自动换后端重发或内部重试。
+SHM 和 RTPS 的普通消息分发都会检查完整解码结果，非法或截断输入不会进入业务回调。
 
 ## 按层找接口
 
-| 想做什么 | 接口 / 位置 |
+| 目的 | 接口 / 源码 |
 | --- | --- |
-| 创建业务收发端 | [Node::CreatePublisher/CreateSubscriber](../node/node.h) |
-| 发普通消息 | [Publisher::Publish](../node/publisher.h)，可传消息或 `shared_ptr` |
-| 查订阅者 | `Publisher::GetSubscribers/HasSubscriber` |
-| 明确选择后端 | [Transport::CreateTransmitter/CreateReceiver](../transport/transport.h) 的 `OptionalMode` 参数 |
-| 查看选路 | [SelectMode](../config/transport_mode.h) |
-| 查看启停 | [HybridTransmitter](../transport/transmitter/hybrid_transmitter.h)、[HybridReceiver](../transport/receiver/hybrid_receiver.h) |
-| 查看接收分发 | [dispatcher/](../transport/dispatcher/)、[Subscriber](../node/subscriber.h) |
+| 创建业务端点 | [Node](../node/node.h) |
+| 发布普通消息 | [Publisher::Publish](../node/publisher.h) |
+| 查询已发现订阅者 | `Publisher::GetSubscribers/HasSubscriber` |
+| 明确选择后端 | [Transport](../transport/transport.h) 的 `OptionalMode` |
+| 查看自动选路 | [SelectMode](../config/transport_mode.h) |
+| 查看后端启停 | [HybridTransmitter](../transport/transmitter/hybrid_transmitter.h)、[HybridReceiver](../transport/receiver/hybrid_receiver.h) |
+| 查看接收分发 | [dispatcher](../transport/dispatcher/)、[Subscriber](../node/subscriber.h) |
 
-Node 没有模式参数；直接调用 Transport 时也不会替你创建 Node 的发现关系。
-可参考 [Demo E](../example/demo/demo_transport.cpp) 的显式 RTPS 用法，不能把强制后端说成自动选路。
+Node 没有模式参数。直接调用 Transport 也不会自动创建 Node 的发现关系；强制 RTPS 示例只能证明
+指定后端通信，不能替代真实跨主机自动选路验证。
 
 ## SHM 中保存了什么
 
 | 对象 | 作用 |
 | --- | --- |
-| Segment | 一个频道的共享数据段；默认 POSIX，XSI 供独立测试使用 |
-| State / Block | 共享段状态与每个数据块的长度、类型、读写状态等元数据 |
-| Payload buffer | 真正的消息字节 |
-| ReadableInfo | 通知中的 host、channel、block index、generation，帮助接收端定位数据 |
-| Notifier | 广播“哪个块有新消息”，不携带完整 Payload |
-| Writable/ReadableBlockLease | 保持映射和块读写所有权，释放时归还 |
+| Segment / Block | 保存 Payload、长度、类型、generation 和读写状态 |
+| ReadableInfo | 记录 host、channel、block index 和 generation |
+| Notifier | 广播块位置，不携带完整 Payload |
+| Block Lease | 保持映射及块的读写所有权，析构时归还 |
 
-发送端提交数据后发布通知；接收端按 channel 找到 Segment，再校验块代次并读取。
-通知成功不保证所有读者收到，也不保证慢读者处理时旧块仍可读。
+普通 SHM 消息经过 DataStream。纯 SHM Loan 可直接填充借出的 Block，接收端 View 持有读 Lease，
+避免中间 Payload 复制。通知发出前写 Lease 已释放，慢读者取得读 Lease 前块可能已被复用；
+generation 用于拒绝过期通知。Notifier 是有界广播环，通知成功不保证每个读者最终取得数据。
 
-普通 SHM 经过 `DataStream`。纯 SHM Loan 则直接在借出的 Block 填充数据，接收端持有只读 View，避免中间 Payload 拷贝。
-关键调用与生命周期见 [Loan/View](../example/demo/README.md#loanview-到底省了哪次拷贝)。
+接收端在拿到通知后才申请读 Lease，并根据 Payload 类型走普通解码或 Loan View：
+
+```mermaid
+sequenceDiagram
+    participant N as Notifier
+    participant D as ShmDispatcher 线程
+    participant S as Segment
+    participant R as ReceiverManager
+    N-->>D: ReadableInfo
+    D->>S: 查找 channel 并 AcquireBlockToRead
+    alt 块不存在、代次或边界无效
+        S-->>D: 失败
+        D->>D: 丢弃通知
+    else 普通序列化消息
+        S-->>D: 读 Lease 与 Payload
+        D->>D: 校验类型并完整 DataStream 解码
+        D->>R: 分发 shared_ptr 消息
+        D->>S: 释放读 Lease
+    else Loan Payload
+        S-->>D: 读 Lease 与 Payload
+        D->>D: 构造只读 View，并把 Lease 所有权交给 View
+        D->>R: 分发 shared_ptr View
+        Note over R,S: 最后一个 View 引用释放时归还 Lease
+    end
+```
+
+这也解释了两类失败：通知到达不代表对应 generation 仍在；View 尚被缓存或用户持有时，对应块不能复用。
+
+布局、容量和 Loan 所有权见 [README](../README.md#共享区布局-v3-与兼容性)及
+[测试指南中的通信 Demo](../example/TESTING.md#面试通信-demo)。
 
 ## 启停时必须注意
 
-- 最后一个同模式 peer 离开才停用发送后端；接收端主要注销该 peer 的 listener，channel 资源可以继续复用。
-- `Publish()==true` 只表示 API 成功，不能代替接收确认；普通 Hybrid 无订阅者也可返回 true。
-- Loan 在无路由时失败，旧 SHM Loan 在后端重启后失效；一次多路发送可能部分送达但整体返回 false。
-- 支持一个发布线程与后端启停并发。Publisher/全局对象的关闭必须另行协调，不能边析构边发布。
-- Shutdown 前要结束业务调用并回收线程，不能仅靠释放一个局部指针推断所有资源已退出。
+- 最后一个同模式 peer 离开后才停用发送后端；后续 JOIN 可以重新启用。
+- `Publish()==true` 不等于接收确认；普通 Hybrid 无订阅者也可能返回 true。
+- Loan 无路由时失败；旧 SHM Loan 在后端重启后失效。
+- 一次多路径发送可能部分成功但整体返回 false，已投递消息不会回滚。
+- 支持一个发布线程与后端 Enable/Disable 并发；多发布线程和边析构边发布不在支持范围。
+- 关闭前应结束业务调用和拓扑回调，再销毁 Publisher、Transport 或 Participant。
 
-锁、epoch、共享区版本、Notifier 丢弃行为的完整约定以 [根 README](../README.md#功能与使用边界) 为准。
-运行和清理见 [测试指南](../example/TESTING.md#环境与清理)。
+Discovery Participant 的创建失败会向上返回；显式关闭会等待在飞 Discovery 回调后再释放 listener。
+生命周期切换须从 listener 回调之外的控制线程发起。详细同步规则见
+[README](../README.md#发送端生命周期与并发边界)。
 
 ## 排查收不到消息
 
-按“属性 → 匹配 → 后端 → 内容”的顺序检查：
+1. 检查两端 channel、消息类型和 QoS 是否兼容。
+2. 检查 Publisher 是否发现 Reader，Subscriber 是否发现 Writer。
+3. 检查实际后端是否启用，以及共享区、容量或 Fast DDS 错误。
+4. 检查接收端是否通过边界和解码校验，再检查 DataVisitor 与调度任务。
 
-1. 两端 channel、消息类型、Payload 参数是否一致。
-2. Publisher 是否真的发现订阅者；新进程是否也获得 Writer 信息。
-3. 实际后端是否启用，运行日志是否有共享区布局、容量或 DDS 错误。
-4. 接收端是否收到并完整校验消息；不要只查看发送成功数。
-
-Demo 的 `[DISCOVERY]`、`[ROUTE]`、`[CHECK]` 分别对应这几个环节。
-同机强制 RTPS 和受控 host 元数据测试都不能证明真实跨机器自动通信。
+可按[测试指南](../example/TESTING.md#面试通信-demo)运行通信 Demo；测试范围和历史结果分别见
+[测试指南](../example/TESTING.md)与[测试记录](../example/testlog.md)。

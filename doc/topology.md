@@ -1,8 +1,7 @@
 # Discovery 与拓扑
 
-Discovery 负责回答“谁在发布、谁在订阅”。Publisher/Subscriber 根据这些信息启停通信路径。
-先运行 `./example/demo/run_demo.sh B`，观察 MATCHED、SHM ENABLED 和 FIRST_VALID，再读下面的流程。
-命令在仓库根目录执行；环境要求见 [Demo 指南](../example/demo/README.md)。
+Discovery 回答“谁在发布、谁在订阅”，Publisher/Subscriber 再根据这些信息启停通信路径。
+它负责控制面，不承载业务 Payload。
 
 ## 一次订阅如何建立
 
@@ -12,32 +11,35 @@ sequenceDiagram
     participant D as ChannelManager / Discovery
     participant P as Publisher
     participant H as HybridTransmitter
-    S->>D: Join(reader 属性)
-    D->>D: 更新本地表，向远端公告
+    participant R as Discovery RTPS
+    S->>D: Join(READER, RoleAttributes)
+    D->>D: 校验类型并更新本地表
     D->>P: Reader JOIN 通知
-    P->>H: Enable(reader 属性)
-    H->>H: 按 IP/PID 选择并启用后端
+    P->>H: Enable(reader)
+    H->>H: 按 IP/PID 选择后端
+    D->>R: 本地同步回调返回后，向远端公告 ChangeMsg
 ```
 
-接收端也需要 Publisher 的属性：收到 Writer JOIN 后，HybridReceiver 才把 listener 注册到对应接收后端。
-**发现了订阅者不等于消息已送达**，仍须检查首条有效接收。
+接收端也必须取得 Writer 属性，HybridReceiver 才会注册对应 peer 的接收 listener。发现匹配只表示
+通信路径具备启用条件，不表示消息已经送达。
 
 ## 先认清几个名称
 
-| 名称 | 表示什么 | 源码 |
+| 名称 | 含义 | 源码 |
 | --- | --- | --- |
-| Node | 应用节点，可创建多个发布/订阅端 | [node.h](../node/node.h) |
+| Node | 应用节点，可创建多个发布/订阅端点 | [node.h](../node/node.h) |
 | Writer / Reader | 拓扑中对 Publisher / Subscriber 的称呼 | [role.h](../discovery/role/role.h) |
-| RoleAttributes | channel、节点、IP、PID、endpoint id、消息类型与 QoS | [RoleAttributes.h](../config/RoleAttributes.h) |
-| ChangeMsg | 谁在什么时候 JOIN/LEAVE | [topology_change.h](../config/topology_change.h) |
-| TopologyManager | 创建发现通信、管理节点和频道管理器、处理参与者离线 | [topology_manager.cpp](../discovery/topology_manager.cpp) |
-| ChannelManager | 保存频道的发布/订阅关系，并发出变更通知 | [channel_manager.cpp](../discovery/specific_manager/channel_manager.cpp) |
+| RoleAttributes | channel、节点、IP、PID、endpoint id、消息类型和 QoS | [RoleAttributes.h](../config/RoleAttributes.h) |
+| ChangeMsg | 一个角色的 JOIN/LEAVE 公告 | [topology_change.h](../config/topology_change.h) |
+| TopologyManager | 管理发现 Participant、NodeManager、ChannelManager 和参与者离线 | [topology_manager.cpp](../discovery/topology_manager.cpp) |
+| ChannelManager | 保存端点索引与节点关系，并通知监听者 | [channel_manager.cpp](../discovery/specific_manager/channel_manager.cpp) |
 
-`channel_id` 标识频道，`id` 标识端点，两者不能互换。每个 Subscriber 有自己的端点 ID，同一频道的多个订阅者可以被分别移除。
+`channel_id` 标识频道，`id` 标识端点。每个 Subscriber 有独立端点 ID，同频道多个 Reader 可分别移除。
+同一频道的消息类型在入表前原子检查；冲突或空类型不会入表、通知或继续广播。
 
 ## 怎样查询和监听
 
-应用已有 Publisher 时，优先使用：
+已有 Publisher 时优先使用：
 
 ```cpp
 std::vector<hnu::cmw::config::RoleAttributes> peers;
@@ -45,43 +47,78 @@ publisher->GetSubscribers(&peers);
 const bool has_subscriber = publisher->HasSubscriber();
 ```
 
-上面的 `publisher` 是已初始化的 `Publisher<MessageT>` 指针。查询只反映当前已发现的关系，不是发送确认。
-
-需要更细的信息时，使用 `TopologyManager::Instance()->channel_manager()`：
+查询只反映当前已发现关系，不是发送确认。需要图关系或原始变化时，可从
+`TopologyManager::Instance()->channel_manager()` 取得管理器：
 
 | 接口 | 用途 |
 | --- | --- |
-| `GetReadersOfChannel` / `GetWritersOfChannel` | 查询频道当前端点 |
-| `GetReadersOfNode` / `GetWritersOfNode` | 查询节点端点 |
-| `GetUpstreamOfNode` / `GetDownstreamOfNode` | 查询节点上下游 |
-| `GetFlowDirection` | 查询节点间数据流向 |
-| `AddChangeListener` / `RemoveChangeListener` | 订阅/注销频道端点变更 |
+| `GetReadersOfChannel/GetWritersOfChannel` | 查询频道端点 |
+| `GetReadersOfNode/GetWritersOfNode` | 查询节点端点 |
+| `GetUpstreamOfNode/GetDownstreamOfNode` | 查询节点上下游 |
+| `GetFlowDirection` | 查询节点间数据方向 |
+| `AddChangeListener/RemoveChangeListener` | 订阅或注销端点变化 |
 
-监听回调应按 `channel_name` 和 `role_type` 过滤。保存返回的连接，在捕获对象销毁前注销；注销不保证已经开始的回调全部结束。
-普通应用让 Node 管理 JOIN/LEAVE 即可；直接调用管理器要自己保证属性、身份和对象生命周期一致。
+先检查 `TopologyManager::IsInitialized()` 和返回的 shared_ptr 是否为空。普通应用让 Node 管理
+JOIN/LEAVE；直接调用 Manager 时，调用者须保证属性、身份和生命周期一致。
+
+监听回调应过滤 channel 和 role，并在捕获对象销毁前注销。注销不是在飞回调的完成屏障；
+TopologyManager 的整体 Shutdown 才会先停止并等待自己的 Discovery listener。
 
 ## 订阅者退出和重新加入
 
-1. Subscriber 正常 `Shutdown()`，从拓扑发送 Reader LEAVE。
-2. Publisher 收到真实 LEAVE 后移除该 peer；只有最后一个同模式 peer 离开，才关闭对应发送后端。
-3. 新 Reader JOIN 后可重新启用后端。接收方还必须获得 Writer 信息，才能安装接收 listener。
+1. Subscriber 正常关闭并发布 Reader LEAVE。
+2. Publisher 删除对应 peer；最后一个同模式 peer 离开后关闭该发送后端。
+3. 新 Reader JOIN 后重新启用发送端；接收方取得 Writer 信息后重新安装接收 peer。
 
-Discovery 自身的 RTPS 端点与 DDS 端点公告采用 `RELIABLE + TRANSIENT_LOCAL`；
-公告正文中的业务端点 QoS 默认 `VOLATILE`。
-属性映射、KEEP_ALL 容量及元数据版本要求见 [统一 QoS 约定](../README.md#qos-配置与执行边界)。
-全新订阅进程可读取仍在线发布端保留的 Writer JOIN；Demo D 已去掉应用层重新公告。
-这恢复的是后续消息接收，不包含离线补发。[修复范围](../README.md#discovery-后启动进程发现)；
-[恢复操作](../example/demo/README.md#5-实现要点与验证边界)。
+进程异常离线没有机会主动发送每个角色的 LEAVE，此时由 Participant 发现事件触发整批清理：
+
+```mermaid
+sequenceDiagram
+    participant DDS as Fast DDS Participant Discovery
+    participant T as TopologyManager
+    participant N as NodeManager
+    participant C as ChannelManager
+    participant H as Publisher / Subscriber Hybrid
+    participant X as 重启后的对端进程
+    DDS->>T: REMOVED 或 DROPPED participant(GUID)
+    T->>T: 用 GUID 找到 host_name / process_id
+    T->>N: OnTopoModuleLeave(host, pid)
+    T->>C: OnTopoModuleLeave(host, pid)
+    C->>H: 为已删除角色发出 LEAVE 通知
+    H->>H: Disable 对应 peer
+    DDS->>T: 对端重新启动并 DISCOVERED
+    T->>T: 保存新 GUID 与进程元数据
+    X->>DDS: 重新创建端点并公告新的 JOIN
+    DDS->>C: 交付新 JOIN
+    C->>H: 新 JOIN 重新 Enable peer
+    DDS-->>X: 回放其他仍在线角色保留的 JOIN
+```
+
+正常显式 LEAVE 精确删除一个 endpoint；Participant 离线按 host/PID 清理该进程留下的节点和角色。
+对端重启通常具有新的 PID 或 GUID，恢复依赖新一轮 Participant 发现及拓扑公告，不能复用旧 endpoint 身份。
+新 JOIN 公告与历史接收可以交错；图只说明拓扑清理与发现，不代表崩溃后所有通信资源都能自动恢复。
+
+Manager 先更新本地表，再发送公告；公告失败不会回滚已经生效的本地变更。被消息类型检查拒绝的变更
+不会通知或发送。Reader LEAVE 会同步清理按 node 和 channel 保存的索引。
+
+Discovery 使用 `RELIABLE + TRANSIENT_LOCAL` 和独立的历史容量，后启动进程可读取仍在线角色的公告。
+它不会补发离线期间的业务消息。KEEP_ALL 容量耗尽后也没有自动全量状态重建，具体约定见
+[README 的 QoS 边界](../README.md#qos-配置与执行边界)。
+
+TopologyManager 初始化失败会回收已经创建的 Writer、Reader、history、listener 和 Participant，
+`CreateNode()` 因此返回空指针；修复环境后可调用 `Init()` 重试。显式 Shutdown 会阻止并发的生命周期
+切换，等待在飞发现回调，再按依赖顺序释放资源；它是幂等的，之后可重新 Init。单个 Manager 的
+Shutdown 则是终止操作，不支持重启。重新初始化前应释放旧 Node/端点，外部拓扑监听也要重新注册。
+
+生命周期切换不能从 Fast DDS listener 回调内部重入。Participant 暴露的 Fast DDS raw pointer 是
+借用引用，不能与 Shutdown 并发长期持有。
 
 ## 想继续读源码
 
-按这个顺序阅读，避免从容器实现开始：
+1. [publisher.h](../node/publisher.h)、[subscriber.h](../node/subscriber.h)：注册、查询并处理对端变化。
+2. [manager.cpp](../discovery/specific_manager/manager.cpp)：生命周期、JOIN/LEAVE 和远端公告。
+3. [channel_manager.cpp](../discovery/specific_manager/channel_manager.cpp)：类型校验、端点索引和关系图。
+4. [topology_manager.cpp](../discovery/topology_manager.cpp)：初始化回滚、Participant 离线与显式关闭。
+5. [transport_mode.h](../config/transport_mode.h)：IP/PID 自动选路规则。
 
-1. [publisher.h](../node/publisher.h)、[subscriber.h](../node/subscriber.h)：注册、查询和处理对端变化。
-2. [manager.cpp](../discovery/specific_manager/manager.cpp)：JOIN/LEAVE 的本地处理与远端公告。
-3. [channel_manager.cpp](../discovery/specific_manager/channel_manager.cpp)：维护按 node/channel 索引的端点表和节点图。
-4. [container/](../discovery/container/)：SingleValueWarehouse 保存单值，MultiValueWarehouse 保存多值，Graph 保存节点连接。
-5. [transport_mode.h](../config/transport_mode.h)：真实自动选路规则。
-
-拓扑通知按实际序列化长度申请 DDS 缓冲。公告发送失败不会回滚已更新的本地表，详见 [接口边界](../README.md#discovery-拓扑通知容量)。
-验证入口见 [集成测试](../example/TESTING.md#测试覆盖)；历史结果见 [testlog](../example/testlog.md)。
+运行方法见[测试指南](../example/TESTING.md)，实际结果见[测试记录](../example/testlog.md)。

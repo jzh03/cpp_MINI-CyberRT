@@ -1,188 +1,175 @@
 # MINI CyberRT 通信 Demo
 
-用约 3 分钟演示自动选路、大消息 Loan/View 和订阅者退出恢复。所有场景都在本机运行。
+这组 Demo 在本机展示自动选路、大消息 Loan/View 和订阅者退出恢复。实际验收记录见
+[testlog](../testlog.md#2026-09-12-面试通信-demo-本地验收)。
 
 ## 1. 先跑一遍
 
-在仓库根目录执行：
+从仓库根目录执行：
 
 ```bash
 ./example/demo/run_demo.sh
 ```
 
-脚本会自动构建、依次运行 A～E、检查结果并回收子进程。每段默认观察 30 秒，D 有两段；首次编译时间另计。
-看到每个场景的 `[RESULT] PASS scene=...`，最后出现 `[RESULT] PASS requested=all`，才表示完整演示通过。
+脚本构建后依次运行 A～E，检查结果并回收自己的子进程。每段默认观察 30 秒，D 包含两段。
+每个场景都出现 `[RESULT] PASS scene=...`，最后出现 `[RESULT] PASS requested=all`，才算完整通过。
 
-需要 Linux、g++、make、`unshare` 和已安装的 Fast DDS；[依赖路径检查](../../doc/fastrtps.md)。
-脚本自动设置 `CMW_PATH`，并让本次进程共享独立 IPC 环境，避开宿主旧通知区。若 `unshare` 被禁用，脚本会报错退出。
-
-只构建，或使用其他 Fast DDS 安装目录：
+需要 Linux、g++、make、`unshare` 和 Fast DDS；先看 [依赖检查](../../doc/fastrtps.md)。
+脚本自动设置 `CMW_PATH`，并让本轮进程共享一个独立 IPC namespace。宿主禁止 `unshare` 时会直接失败。
 
 ```bash
-make -C example -f demo/Makefile -j2 demo-transport
-FAST_DDS_HOME="$HOME/cpp/fastdds_2.12/install" ./example/demo/run_demo.sh
+make -C example -f demo/Makefile -j2 demo-transport       # 只构建
+FAST_DDS_HOME="$HOME/cpp/fastdds_2.12/install" \
+  ./example/demo/run_demo.sh                              # 指定依赖目录
 ```
-
-下文命令均为操作示例；已执行的验收记录见 [testlog](../testlog.md#2026-09-12-面试通信-demo-本地验收)。
 
 ## 2. 单独运行与讲解顺序
 
-| 场景 | 运行命令 | 做什么、看什么 |
+| 场景 | 命令 | 展示重点 |
 | --- | --- | --- |
-| A，约 30 秒 | `./example/demo/run_demo.sh A` | 同进程收发；看 MATCHED、INTRA ENABLED 和首条有效消息 |
-| B，约 30 秒 | `./example/demo/run_demo.sh B` | 同机两个进程；看不同 PID、SHM ENABLED 和有效接收 |
-| C，约 30 秒 | `./example/demo/run_demo.sh C` | 1 MiB、5 Hz；看 LOAN_SEND、SHM_READ_ONLY_VIEW 和内容校验 |
-| D，约 60 秒 | `./example/demo/run_demo.sh D` | 发布端不停；看 OFFLINE、DISABLED、重新 ENABLED 和 RECOVERED |
-| E，约 30 秒 | `./example/demo/run_demo.sh E` | **同机强制 RTPS**；看 RTPS ENABLED 和有效接收 |
+| A | `./example/demo/run_demo.sh A` | 同进程；MATCHED、INTRA ENABLED、有效消息 |
+| B | `./example/demo/run_demo.sh B` | 同机双进程；不同 PID、SHM ENABLED、有效接收 |
+| C | `./example/demo/run_demo.sh C` | 1 MiB Loan；LOAN_SEND、只读 View、全内容校验 |
+| D | `./example/demo/run_demo.sh D` | Publisher 不停；OFFLINE、DISABLED、重新 ENABLED、RECOVERED |
+| E | `./example/demo/run_demo.sh E` | **同机强制 RTPS**；RTPS ENABLED、有效接收 |
 
-A/B 展示 Node、Discovery 和自动选路的接入；C 展示 Loan 生命周期管理；D 展示退出与恢复编排；E 展示显式 Transport 接口的使用。
-
-常用选项：
+A～D 使用 Node、Discovery 和默认 HYBRID；E 使用显式 Transport RTPS。常用参数：
 
 ```bash
-./example/demo/run_demo.sh C --payload 4194304        # 4 MiB Loan
-./example/demo/run_demo.sh all --seconds 3 --no-build # 已构建时的短时复验
-./example/demo/build/bin/demo_transport --help       # 程序参数
+./example/demo/run_demo.sh C --payload 4194304
+./example/demo/run_demo.sh all --seconds 3 --no-build
+./example/demo/build/bin/demo_transport --help
 ```
 
-`--seconds` 是每个接收观察段的时长，脚本接受 3～60 秒；`--no-build` 跳过构建。
+脚本的 `--seconds` 为 3～60 秒，`--payload` 只接受 1 MiB 或 4 MiB，`--no-build` 复用已有 Demo。
 普通消息默认 1024 字节、10 Hz，Loan 默认 1 MiB、5 Hz。
 
 ## 3. 怎么看输出
 
-| 输出 | 含义 |
+| 输出 | 成功判据 |
 | --- | --- |
-| `[DISCOVERY] MATCHED / OFFLINE` | 真实订阅者集合出现 / 变为空 |
-| `[ROUTE] ... ENABLED / DISABLED` | 真实发送后端启用 / 停用；单凭启用不能证明送达 |
-| `[CHECK] FIRST_VALID / CONTIGUOUS_10` | 第一条完整校验通过 / 连续收到 10 条正确消息 |
-| `[PUB] attempts / success / fail` | 发送尝试数 / API 返回成功数 / 失败数 |
-| `[SUB] valid / invalid / gaps_online / order_errors` | 有效接收数 / 校验错误 / 在线序号缺口 / 重复或倒序 |
-| `[RESULT] PASS / FAIL` | 本进程或场景的检查结果；看清 `role`、`scene` 或 `requested` |
+| `[DISCOVERY] MATCHED / OFFLINE` | 订阅者集合出现 / 变为空 |
+| `[ROUTE] ... ENABLED / DISABLED` | 对应发送后端启用 / 停用；启用本身不代表送达 |
+| `[CHECK] FIRST_VALID / CONTIGUOUS_10` | 首条全内容正确 / 连续 10 条正确 |
+| `[SUB] valid / invalid / gaps_online / order_errors` | 有效数；校验错误、在线缺口、重复或倒序 |
+| `[RESULT] PASS / FAIL` | 进程或场景最终结果，需核对 `role`、`scene` 或 `requested` |
 
-程序每秒汇总一次，不逐条刷屏。消息会检查序号、长度和全部 Payload 字节；发送失败、校验错误、在线缺口或顺序错误都会导致失败。
-**发送成功不等于接收成功**：普通 Publish 无订阅者时也可能返回 true，另计为 `no_peer_attempts`。
-每次订阅从首条有效消息建立统计基线，主动离线期间不计入新订阅者的缺口。
+程序校验序号、长度和全部 Payload 字节。发送失败、内容错误、在线缺口或顺序错误都会失败。
+普通 Publish 无订阅者时也可能返回 true，因此发送成功不等于接收成功；离线期间不计新订阅者缺口。
 
 ## 4. 双终端手动演示
 
-先按第 1 节构建。两个终端都进入仓库根目录，按下列顺序操作。
-
-### 第一步：让两端共享同一 IPC 环境
-
-终端一执行并保持这个 shell 打开：
+先构建 Demo。终端一创建 IPC 环境并保持 shell：
 
 ```bash
 unshare --user --map-root-user --ipc bash
 echo "DEMO_SHELL_PID=$$"
 ```
 
-终端二执行，提示后输入终端一刚打印的 PID：
+终端二输入上述 PID，加入同一个环境：
 
 ```bash
 read -r -p '输入终端一的 DEMO_SHELL_PID: ' DEMO_SHELL_PID
 nsenter --target "$DEMO_SHELL_PID" --user --ipc --preserve-credentials bash
 ```
 
-不要在两端分别执行 `unshare`，否则它们不能共享通知区。
+### 第一步：让两端共享同一 IPC 环境
 
-### 第二步：设置相同参数
-
-在两个终端的新 shell 中都执行以下命令。每次重新演示，请双方一起换一个新频道名。
+不要让两个终端各自执行 `unshare`，否则通知区互不可见。两个新 shell 都进入仓库根目录并设置相同参数：
 
 ```bash
 export CMW_PATH="$PWD" CMW_DEMO_TRACE=1
 BIN="$PWD/example/demo/build/bin/demo_transport"
-CHANNEL=interview_001
-SCENE=D
-PAYLOAD=1024
-HZ=10
+CHANNEL=interview_001; SCENE=D; PAYLOAD=1024; HZ=10
 ```
 
-### 第三步：启动订阅端，再启动发布端
-
-先在终端二执行；随后在终端一启动发布端，不要超过 20 秒：
+每次演示双方一起换新频道。先在终端二启动订阅者，再在 20 秒内从终端一启动发布者：
 
 ```bash
+# 终端二
 "$BIN" --role sub --scenario "$SCENE" --channel "$CHANNEL" \
   --payload "$PAYLOAD" --hz "$HZ" --seconds 30
-```
 
-终端一执行：
-
-```bash
+# 终端一
 "$BIN" --role pub --scenario "$SCENE" --channel "$CHANNEL" \
   --payload "$PAYLOAD" --hz "$HZ" --seconds 180
 ```
 
-终端二到时正常退出。等终端一出现 `OFFLINE subscribers=0` 和 SHM `DISABLED`，再执行一次订阅端命令。
-看到 `RECOVERED` 是自动脚本的结果；手动运行时查看第二次 `CONTIGUOUS_10`，以及新首序号大于上次末序号。
-结束时在发布端按 Ctrl+C，最后两端执行 `exit` 离开隔离 shell。
+D 场景中，首个订阅者正常退出后等待 Publisher 显示 OFFLINE 和 SHM DISABLED，再运行一次订阅命令。
+第二次出现 `CONTIGUOUS_10`，且新首序号大于上次末序号，表示恢复成功。最后在发布端按 Ctrl+C，并在两端 `exit`。
 
-换场景时，在两端设置相同变量后重复启动命令：
+D 的关键顺序如下。第一个 Subscriber 必须正常退出；第二个 Subscriber 是新进程，先从 Discovery
+获得仍在运行的 Writer 公告，再建立 Reader 并接收匹配后的新业务消息。Publisher 全程不重启，离线期间不补发。
 
-| 演示内容 | 两端共同设置 |
-| --- | --- |
-| B：普通 SHM | `SCENE=B; PAYLOAD=1024; HZ=10` |
-| C：1 MiB Loan | `SCENE=C; PAYLOAD=1048576; HZ=5` |
-| C：4 MiB Loan | `SCENE=C; PAYLOAD=4194304; HZ=5` |
-| E：同机强制 RTPS | `SCENE=E; PAYLOAD=1024; HZ=10` |
+```mermaid
+sequenceDiagram
+    participant P as Publisher（持续运行）
+    participant D as Discovery
+    participant S1 as Subscriber 1
+    participant S2 as Subscriber 2（新进程）
+    P->>D: 发布 Writer 公告
+    S1->>D: 启动并查询 Writer 信息
+    D-->>S1: Writer 公告
+    S1->>D: JOIN READER
+    D-->>P: Reader JOIN
+    P-->>S1: 匹配后的新业务消息
+    S1->>D: 正常退出，Reader LEAVE
+    D-->>P: OFFLINE subscribers=0
+    P->>P: SHM DISABLED，发布序号继续
+    S2->>D: 启动后先查询 Writer 历史公告
+    D-->>S2: 返回仍在线的 Writer 公告
+    S2->>D: 建立 Reader，重新 JOIN
+    D-->>P: Reader JOIN
+    P->>P: SHM ENABLED
+    P-->>S2: 只发送重新匹配后的新消息
+    Note over P,S2: 不补发 Subscriber 离线期间的业务消息
+```
 
-同进程 A 只需一个终端：`"$BIN" --role intra --scenario A --channel "$CHANNEL" --seconds 30`。
-程序还支持 `--hz`（1～100）、`--seconds`（1～600）；普通 Payload 为 16～65536 字节，C 只接受 1/4 MiB。至少收齐 10 条才能通过。
+切换场景时共同设置：B 为 `SCENE=B; PAYLOAD=1024; HZ=10`，C 为
+`SCENE=C; PAYLOAD=1048576; HZ=5` 或 4 MiB，E 为 `SCENE=E; PAYLOAD=1024; HZ=10`。
+A 只需单进程：`"$BIN" --role intra --scenario A --channel "$CHANNEL" --seconds 30`。
 
 ## 5. 实现要点与验证边界
 
-- **自动选路：**A～D 使用真实 `CreateNode`、Publisher、Subscriber，保留默认 HYBRID。
-  同 IP 同 PID 选 INTRA，同 IP 不同 PID 选 SHM；不同位置的订阅者可以使多条路径同时启用。
-  E 使用 `Transport::CreateTransmitter/CreateReceiver(..., OptionalMode::RTPS)`，因为 Node 没有显式模式参数。
-- **路径证据：**[trace.h](trace.h) 只在独立 Demo 构建中启用，`CMW_DEMO_TRACE=1` 打开启停输出。
-  输出位置在三个发送后端的实际状态切换处。SHM 映射可能延迟到首次发送，仍须以有效接收确认通信。
-- **D 怎么恢复：**Publisher 保持运行，旧订阅进程正常退出，观察到 OFFLINE 和 SHM DISABLED 后启动新进程。
-  新进程通过 Discovery 保留的历史公告发现旧 Writer，自动恢复 SHM，校验至少 10 条连续新消息。
-  已移除 Demo 的 Writer 重新公告；离线期间的消息不补发，也不计入新订阅进程的序号缺口。
-  [修复说明与边界](../../README.md#discovery-后启动进程发现)；9 月 12 日的历史验收仍记录当时使用的重公告方式。
-- **本机边界：**E 只验证同机强制 RTPS；没有验证真实跨机器自动选路或 SIGKILL 故障恢复。
-  受控频率收发通过不等于极限吞吐无丢失。本 Demo 不输出性能提升倍数。
+- A～D 根据 IP/PID 选择 INTRA 或 SHM；多个不同位置的 peer 可同时启用多条路径。
+- [trace.h](trace.h) 只注入 Demo 构建；`CMW_DEMO_TRACE=1` 输出实际后端状态变化。最终仍以有效接收为准。
+- D 依靠 Discovery 的 Writer 历史公告让新进程恢复，只接收重新匹配后的新消息，不补发离线业务消息。
+- E 只验证两个本机进程强制 RTPS，不是跨机器验证；正常退出恢复也不是 SIGKILL 恢复。
+- 受控频率通过不代表极限吞吐、无损容量或硬实时保证。本 Demo 不输出性能提升倍数。
 
 ### Loan/View 到底省了哪次拷贝
 
-阅读 [demo_transport.cpp](demo_transport.cpp) 的 `Send<LoanedMessage>` 和 `Receive(LoanedMessage)`：
+[demo_transport.cpp](demo_transport.cpp) 的 Loan 发送先用 `AcquireMessage(payload)` 借出 SHM Block，
+在 `mutable_data()` 中直接生成内容，设置长度后转移所有权。接收回调拿到只读 View，通过 `data()` 校验内容、
+channel 和 generation，不把裸指针留到回调外。
 
-1. `AcquireMessage(payload)` 借出 SHM 缓冲，确认 `is_shm_backed()`。
-2. `Fill(m->mutable_data(), ...)` 在借出的空间直接生成内容，再 `set_size()`、`Publish(std::move(m))`；提交后不再使用原 Loan。
-3. 接收回调中的 `shared_ptr<LoanedMessage>` 就是只读 View。通过 `data()` 校验内容，同时检查只读、channel 和 generation；不把裸指针留到回调外。
+纯 SHM Loan 省去普通消息的中间 Payload 序列化、复制入共享区和接收端 Payload 反序列化复制。
+内容生成、全量校验、元数据和通知仍有成本；混合路径可能使用 heap 或复制。读 Lease 随最后一个消息引用释放，
+运行库队列仍可能短暂持有引用。不要用跨进程指针地址证明零拷贝。
 
-这省去了普通消息的中间 Payload 序列化/复制入 SHM，以及接收端反序列化时的 Payload 拷贝。
-内容生成、校验、元数据和通知仍有成本。读 Lease 随最后一个消息引用释放；Demo 将 Loan 的 Blocker history 设为 0，运行库队列仍可能暂时持有引用。
+1 MiB/4 MiB 在当前 32 MiB 消息上限内，共享段约需 65 MiB/257 MiB。
+[性能方法](../TESTING.md#性能程序) 与 [历史结果](../testlog.md#2026-09-11-独立进程-shm-性能实验) 另行记录。
 
-不比较跨进程指针地址来证明零拷贝。当前纯 SHM Loan 才能保持直接提交原 Block；混合路径可能使用 heap 或复制。
-1 MiB/4 MiB 在当前 32 MiB 上限内；共享段约需 65 MiB/257 MiB 空间。
-
-性能测试另见 [benchmark 用法](../TESTING.md#性能程序) 和 [已有性能结果](../testlog.md#2026-09-11-独立进程-shm-性能实验)。
+现场展示建议按 A/B → C → D 讲自动选路、Loan 和恢复，E 只在需要说明网络后端时展开。
+提前构建并做一次短时复验；保留一段成功运行的录屏和对应输出，避免现场环境问题中断讲解。
 
 ## 6. 失败排查与清理
 
-脚本开头会打印 `run_dir=...`。日志保存在 `example/demo/runs/本轮目录/`：
+脚本开头打印 `run_dir=...`。`example/demo/runs/本轮目录/` 保存构建输出、各角色输出、完整命令、PID、退出码，
+并把本轮运行库 Logger 文件从根 `log/` 原样迁入。手动启动的 Logger 文件仍留在根 `log/`。
+这是现有脚本的实际归档路径，尚待按 [AGENTS.md](../../AGENTS.md#日志文件归档) 迁入根目录 `log/`。
 
-| 文件 | 用途 |
+| 现象 | 检查 |
 | --- | --- |
-| `build.log` | 构建错误 |
-| `A.log`、`B_pub.log`、`B_sub1.log` 等 | 角色输出、路径事件和检查结果 |
-| `*.runtime.log` | 运行库 Logger 日志，进程退出后从根目录 `log/` 原样迁入 |
-| `commands.txt` | 完整命令、频道、PID、退出码和日志迁移位置 |
+| 找不到 Fast DDS | 核对 `FAST_DDS_HOME`，运行 [依赖检查](../../doc/fastrtps.md) |
+| `No space left on device` | 分别检查工作盘和 `/dev/shm` |
+| `unshare: Operation not permitted` | 宿主不允许隔离；改用已确认兼容的 IPC 环境 |
+| notifier 布局不兼容 | 确认两端位于同一新 IPC 环境，不删除陌生通知区 |
+| 匹配、首条或恢复失败 | 核对频道、场景、Payload，并查看角色输出和 runtime 日志 |
 
-| 现象 | 先检查 |
-| --- | --- |
-| 找不到 Fast DDS 头文件或库 | [依赖检查](../../doc/fastrtps.md)，确认 `FAST_DDS_HOME` |
-| `No space left on device` | `df -h . /dev/shm`；编译磁盘与共享内存是两处空间 |
-| `unshare: Operation not permitted` | 当前环境不允许隔离运行，需使用已有的兼容 IPC 环境 |
-| `incompatible notifier shm layout` | 两端是否进入了同一个新 IPC 环境；不要删除陌生通知区 |
-| 匹配或首条超时 | 两端频道、场景、Payload 是否一致；查看 runtime 日志 |
-| 已匹配却无法恢复接收 | 重新构建以包含 Discovery 修复，确认两端频道和 IPC 环境一致；恢复成功须看到新的 `CONTIGUOUS_10` |
+构建最多 300 秒，匹配/首条最多 20 秒，离线最多 15 秒，正常退出最多 10 秒。
+Ctrl+C 先请求本轮子进程正常退出，超时后才终止并判失败。脚本不批量杀进程、不清空 `/dev/shm`，
+只报告本轮确切残留段；无法确认无人使用时不要删除。
 
-构建上限 300 秒，匹配/首条最多 20 秒，离线最多 15 秒，正常退出最多 10 秒。启动时的 1 秒预留只用于初始化，不作为成功条件。
-Ctrl+C 会请求本次子进程正常退出并等待；仍不退出才终止该子进程并报错。
-脚本不执行批量杀进程或清空 `/dev/shm`，只报告本轮确切残留段名。无法确认资源无人使用时不要删除。
-
-构建产物在 `example/demo/build/`，日志在 `runs/`，均已忽略。要重新构建，可删除自己的 `example/demo/build/`；保留 `runs/` 便于排查。
-手动启动时 Logger 日志留在根目录 `log/`。Ctrl+C 回收复验可运行 `python3 example/demo/check_interrupt.py`，只用 Python 标准库。
+Demo 产物保存在 `example/demo/build/`。重新构建前可在确认无进程使用后删除该目录；保留 `runs/` 便于排查。
+Ctrl+C 回收检查可运行 `python3 example/demo/check_interrupt.py`。

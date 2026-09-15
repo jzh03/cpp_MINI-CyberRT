@@ -35,6 +35,25 @@ make -C example -f demo/Makefile -j2 demo-transport
 E 是两个本机进程**强制 RTPS**收发。出现 RTPS ENABLED 还不够，需要首条有效消息和场景 PASS。
 完整步骤见 [Demo 指南](../example/demo/README.md)。
 
+依赖检查、构建、启动和有效接收是逐层验证关系；任一层成功都不能代替下一层。按下图定位最先失败的层级：
+
+```mermaid
+flowchart TD
+    A[设置 FAST_DDS_HOME] --> B[check-fastdds<br/>检查指定头文件和动态库]
+    B --> C{所需文件齐全？}
+    C -- 否 --> X[修正安装目录或安装产物]
+    C -- 是，只证明文件存在 --> D[构建 demo-transport]
+    D --> E{编译和链接成功？}
+    E -- 否 --> Y[核对头库版本、ABI 和链接库名]
+    E -- 是，只证明可构建 --> F[运行本机场景 E]
+    F --> G{出现 RTPS ENABLED？}
+    G -- 否 --> Z[检查启动、参数和 runtime 日志]
+    G -- 是，只证明后端启用 --> H{FIRST_VALID、CONTIGUOUS_10<br/>及场景 PASS？}
+    H -- 否 --> Z
+    H -- 是 --> I[本机双进程显式 RTPS 收发有效]
+    I --> J[不等于真实跨主机已验证]
+```
+
 构建会添加 Fast DDS 的 include/lib 路径，并把库目录写入 rpath；通常不需要另设 `LD_LIBRARY_PATH`。
 C++14 构建保留 `-faligned-new`，链接还需要 pthread、uuid、rt、atomic、dl；正式测试另外依赖 GoogleTest。
 
