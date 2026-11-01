@@ -1,3 +1,5 @@
+> 本仓库为历史 fork，后续开发与完整说明见 [jzh03/mini-cyberrt](https://github.com/jzh03/mini-cyberrt)。
+
 # MINI CyberRT
 
 基于 cmw 二次开发的 C++ 发布订阅通信中间件，面向 Linux。主要能力是 Discovery 自动发现、
@@ -26,8 +28,6 @@ INTRA/SHM/RTPS 自动选路、SHM Loan/View，以及配套的生命周期保护�
 | 回调如何执行 | [调度器](doc/scheduler.md)、[协程](doc/croutine.md)、[基础组件](base/base.md) |
 | 运行测试、sanitizer 或 benchmark | [测试指南](example/TESTING.md) |
 | 查实际命令、失败与复验 | [测试日志](example/testlog.md) |
-| 准备展示与实习面试 | [通信 Demo](example/demo/README.md)、[项目评审](doc/review-20260914.md) |
-| 维护文档与产物目录 | [AGENTS.md](AGENTS.md) |
 
 ## 功能与使用边界
 
